@@ -30,12 +30,21 @@ for empty segments, outputs cast back to the input dtype, offsets assumed valid
 
   Each call includes bf16 promotion, CUB workspace queries and allocation,
   every kernel and the output cast.
-- `triton_reference.py`: a handwritten Triton 3.8 kernel, 32-row tiles and up
-  to 32 feature columns per program, one program per segment and feature tile;
-  softmax uses max, denominator and normalize kernels. Sum uses lane
-  compensation and a fixed reduction tree. No autotuning. It uses the CUDA
-  toolkit's ptxas and libdevice (`TRITON_PTXAS_PATH`, `TRITON_LIBDEVICE_PATH`),
-  with FMA fusion and flush-to-zero disabled.
+- `triton_reference.py`: Triton 3.8 kernels with two mappings. `segment` runs
+  one program per (segment, feature tile) over all of its rows. `chunked` cuts
+  every segment into chunks of at most CHUNK rows, one program each: a
+  one-program map kernel builds the chunk-to-segment table on the device,
+  chunks of multi-chunk segments write partial results, and a combine kernel
+  merges them, so a long segment spreads over the GPU. Softmax keeps online
+  statistics (running maximum, rescaled compensated exponential sum) and reads
+  the rows twice; sums are compensated. On the first call for each input shape
+  the adapter times every candidate configuration (`candidates()`: mapping,
+  rows per tile, feature tile of up to 32 or 128 columns, 4 or 8 warps, chunk
+  of 4 or 32 tiles; 8 configurations at D=1 and 16 at D=128) on that input and
+  keeps the fastest, which favors Triton: it is tuned on the measured data
+  itself. It uses the CUDA toolkit's ptxas and libdevice
+  (`TRITON_PTXAS_PATH`, `TRITON_LIBDEVICE_PATH`), with FMA fusion and
+  flush-to-zero disabled.
 - `fbgemm_reference.py`: FBGEMM 1.8 `jagged_softmax` on packed values and the
   original offsets, with `max_L=N` unless length hints give the exact maximum.
   Optional; see [compatibility](../docs/compatibility.md).

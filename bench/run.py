@@ -117,7 +117,10 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
         torch.cuda.synchronize()
         del output
         metadata["compile_and_first_call_wall_ms"] = (time.perf_counter_ns() - start) / 1e6
-        metadata["mapping"] = "fixed 32-row tiles; one program per segment/feature tile; no autotuning"
+        # The first call times every candidate configuration on this input.
+        metadata["tuning"] = triton_reference.last_tuning()
+        metadata["mapping"] = ("autotuned on this input: one program per segment, or chunks of a tuned "
+                               "row count with a combine kernel; online softmax")
         return call, metadata
     if method in ("cuda-naive", "cub"):
         if method == "cub" and args.d != 1:
