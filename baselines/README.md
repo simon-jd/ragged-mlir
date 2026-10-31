@@ -12,8 +12,9 @@ for empty segments, outputs cast back to the input dtype, offsets assumed valid
   `-inf` and reduces the dense `[B, max_len, D]` tensor, because NJT's own
   padding uses a finite minimum that breaks empty and all-`-inf` segments;
   that padded tensor can be far larger than the packed input. The benchmark
-  passes `min_seqlen`/`max_seqlen` only with `--length-hints`; without them
-  the eager sum and max pad every segment to the total row count.
+  always constructs the NJT with the exact `min_seqlen` and `max_seqlen`,
+  which NJT users carry as metadata; without `max_seqlen` the padded eager sum
+  and max pad every segment to the total row count.
 - `cuda/baselines.cu` and `native.py`:
   - `cuda-naive`: one 256-thread block per segment. The threads form up to 32
     feature lanes (contiguous columns for a warp) times 256/lanes row lanes,

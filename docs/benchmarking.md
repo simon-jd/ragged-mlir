@@ -56,10 +56,9 @@ Unsupported combinations (CUB at D>1, softmax in `torch.segment_reduce`) are
 ## Options
 
 - `--length-hints` passes the workload's exact minimum and maximum segment
-  length to ragged and NJT (as `min_seqlen`/`max_seqlen`), which lets ragged
-  drop classes and the classify pass. Without it NJT gets no length bounds.
-  Hinted and unhinted runs are recorded separately; the committed hinted runs
-  measure ragged and `torch.segment_reduce` only.
+  length to ragged, which lets it drop classes and the classify pass. NJT
+  always gets them, as `min_seqlen`/`max_seqlen`. Hinted and unhinted runs are
+  recorded separately.
 - `--disable-optimization NAME` (classification, online_fusion, warp_mapping,
   split_mapping, shuffle, pointwise_fusion, row_pipelining) and `--feature-tile`
   for ablations.

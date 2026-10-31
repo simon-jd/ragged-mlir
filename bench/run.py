@@ -184,7 +184,9 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
     njt_provenance = {**torch_provenance, "baseline_strategy":
         "public NJT construction and explicit -inf padding before amax; N=0 shape identity"
         if args.op == "max" else "public NJT " + args.op}
-    bounds = getattr(args, "length_bounds", {})
+    # NJT carries its sequence lengths as metadata, so it gets the exact
+    # min/max segment lengths in every run (ragged only with --length-hints).
+    bounds = getattr(args, "sequence_bounds", None) or getattr(args, "length_bounds", {})
     if method == "njt-compile":
         # Do not substitute eager if Inductor/fullgraph rejects the workload.
         start = time.perf_counter_ns()
@@ -261,18 +263,17 @@ def run(args) -> tuple[dict, int]:
         report.update(status="blocked", reason=str(exc))
         return report, 2
     values, offsets, case = prepare_case(args)
-    if getattr(args, "length_hints", False):
-        lengths = np.diff(offsets.astype(np.int64))
-        args.length_bounds = {"min_len": int(lengths.min()) if len(lengths) else 0,
-                              "max_len": int(lengths.max()) if len(lengths) else 0}
-    else:
-        args.length_bounds = {}
+    lengths = np.diff(offsets.astype(np.int64))
+    args.sequence_bounds = {"min_len": int(lengths.min()) if len(lengths) else 0,
+                            "max_len": int(lengths.max()) if len(lengths) else 0}
+    args.length_bounds = dict(args.sequence_bounds) if getattr(args, "length_hints", False) else {}
     mask = (np.random.default_rng(args.seed + 2).normal(0, 0.1, values.shape).astype(np.float32)
             if getattr(args, "mask", False) else None)
     scale = float(np.float32(getattr(args, "scale", 1.0)))
     case.update(scale=scale, mask_sha256=hashlib.sha256(mask.tobytes()).hexdigest() if mask is not None else None,
                 disabled_optimizations=getattr(args, "disable_optimization", []),
-                feature_tile=getattr(args, "feature_tile", None), length_bounds=args.length_bounds)
+                feature_tile=getattr(args, "feature_tile", None), length_bounds=args.length_bounds,
+                njt_sequence_bounds=args.sequence_bounds)
     values_bytes = values.size * (2 if args.dtype == "bf16" else 4)
     case.update(values_bytes=values_bytes, offsets_bytes=offsets.nbytes,
                 mask_bytes=mask.nbytes if mask is not None else 0,
@@ -345,7 +346,8 @@ def main():
                         choices=("classification", "online_fusion", "warp_mapping", "split_mapping", "shuffle", "pointwise_fusion",
                                  "row_pipelining"))
     parser.add_argument("--feature-tile", type=int, choices=(1, 2, 4, 8, 16, 32))
-    parser.add_argument("--length-hints", action="store_true", help="supply the saved workload's exact min/max bounds to both ragged and NJT")
+    parser.add_argument("--length-hints", action="store_true",
+                        help="supply the workload's exact min/max segment lengths to ragged (NJT always gets them)")
     parser.add_argument("--serial-classes", action="store_true",
                         help="launch ragged's segment-class workers one after another on the caller's stream")
     parser.add_argument("--warmup", type=int, default=5)
