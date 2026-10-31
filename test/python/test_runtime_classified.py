@@ -17,7 +17,7 @@ def host_program(*, debug=True):
     key = CacheKey.from_spec(spec, llvm_commit="host-test", ptxas_version="host-test", compiler_sha256="3"*64)
     workspace = [{"name": "class_counts", "shape": [3], "dtype": "i64"},
                  {"name": "segment_ids", "shape": [3, "B"], "dtype": "i64"},
-                 {"name": "partials", "shape": ["B", 264], "dtype": "f32"},
+                 {"name": "partials", "shape": ["B_split", 264], "dtype": "f32"},
                  *[{"name": name, "shape": ["B", 33], "dtype": "f32"} for name in ("max_stats", "sum_stats")]]
     if debug:
         workspace.append({"name": "visits", "shape": ["B"], "dtype": "i32"})
@@ -33,7 +33,7 @@ def host_program(*, debug=True):
             z = 8 if segment_class == "split" and (phase.startswith("partial_") or phase == "normalize") else 1
             kernels.append({"name": role, "role": role, "segment_class": segment_class,
                             "grid": ["min_B_resident", 2, z], "block": [32 if segment_class == "warp" else 128, 1, 1], "args": args})
-    metadata = {"schema": 1, "abi": "mlir-memref64-v1", "dispatch_abi": "classified-v2",
+    metadata = {"schema": 1, "abi": "mlir-memref64-v1", "dispatch_abi": "classified-v3",
                 "backend": "classified-persistent", "classes": list(phases), "thresholds": [32, 4096],
                 "fusion": "three_pass", "alias_safe": True, "split_parts": 8, "debug_visits": debug,
                 "workspace": workspace, "kernels": kernels, "compiler_sha256": key.compiler_sha256,
@@ -106,14 +106,15 @@ def host_cuda(monkeypatch):
 
 def test_classified_scratch_full_descriptors_and_debug_handles(host_cuda):
     env = host_cuda
-    n, b, d = 400, 257, 33
+    # At most three of the 257 segments can exceed 4,096 of the 12,291 rows.
+    n, b, d = 4097 * 3, 257, 33
     buffers = {}
-    report = env.program.run(env.Tensor((n, d), "f32", 0x100000), env.Tensor((b+1,), "i64", 0x200000),
-                             env.Tensor((n, d), "f32", 0x300000), stream=env.consumer, debug_buffers=buffers)
+    report = env.program.run(env.Tensor((n, d), "f32", 0x1000000), env.Tensor((b+1,), "i64", 0x2000000),
+                             env.Tensor((n, d), "f32", 0x3000000), stream=env.consumer, debug_buffers=buffers)
     assert env.current[0] is env.producer
     assert list(buffers) == ["class_counts", "segment_ids", "partials", "max_stats", "sum_stats", "visits"]
     assert [(tensor.shape, tensor.dtype) for tensor in buffers.values()] == [
-        ((3,), "i64"), ((3, b), "i64"), ((b, 8*d), "f32"), ((b, d), "f32"), ((b, d), "f32"), ((b,), "i32")]
+        ((3,), "i64"), ((3, b), "i64"), ((3, 8*d), "f32"), ((b, d), "f32"), ((b, d), "f32"), ((b,), "i32")]
     # One scratch allocation on the consumer stream, buffers at 256-byte offsets.
     [scratch] = env.allocations
     assert scratch.dtype == "u8"
@@ -122,7 +123,7 @@ def test_classified_scratch_full_descriptors_and_debug_handles(host_cuda):
     sizes = [tensor.numel() * tensor.element_size() for tensor in buffers.values()]
     assert all(after - before < size + 256 for before, after, size in zip(pointers, pointers[1:], sizes))
     assert scratch.shape == (pointers[-1] + sizes[-1],)
-    assert report.workspace_bytes == 24 + b * (24 + 8*d*4 + 2*d*4 + 4) == sum(sizes)
+    assert report.workspace_bytes == 24 + b * (24 + 2*d*4 + 4) + 3 * 8*d*4 == sum(sizes)
     assert len(env.launches) == 13
     assert report.grids[:2] == ((1, 1, 1), (3, 1, 1))
     # Worker grid x is min(B, resident blocks // feature tiles // parts).

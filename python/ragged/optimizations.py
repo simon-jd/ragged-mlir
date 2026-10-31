@@ -97,7 +97,7 @@ def validate_optimization_metadata(metadata: dict[str, Any]) -> Optimizations | 
     if config.feature_tile is not None and tile != config.feature_tile:
         raise CacheMismatch("actual feature tile differs from the requested explicit tile")
     classes = metadata.get("classes", [])
-    expected = {"classification": metadata.get("dispatch_abi") == "classified-v2",
+    expected = {"classification": metadata.get("dispatch_abi") == "classified-v3",
                 "online_fusion": metadata.get("fusion") in ("online", "mixed"), "warp_mapping": "warp" in classes,
                 "split_mapping": "split" in classes, "shuffle": "warp" in classes and config.shuffle,
                 "row_pipelining": config.row_pipelining}
@@ -151,7 +151,7 @@ def validate_optimization_spec(spec: ProgramSpec, metadata: dict[str, Any]) -> N
     if materialized and metadata["workspace"][-1]["shape"] != ["N",spec.feature_dim]:
         raise CacheMismatch("materialized logits feature width differs from source")
     core = computation_metadata(metadata)
-    workers = core["kernels"][2:] if core.get("dispatch_abi") == "classified-v2" else core["kernels"]
+    workers = core["kernels"][2:] if core.get("dispatch_abi") == "classified-v3" else core["kernels"]
     if any(kernel["grid"][1] != (spec.feature_dim + tile - 1) // tile for kernel in workers):
         raise CacheMismatch("worker grids must cover exactly ceil(D/d_tile) feature tiles")
     fusion = core.get("fusion")
@@ -161,7 +161,7 @@ def validate_optimization_spec(spec: ProgramSpec, metadata: dict[str, Any]) -> N
     class_fusion(core)
     if spec.force_fusion and fusion != "online":
         raise CacheMismatch("forced online fusion is absent from the compiled schedule")
-    if core.get("dispatch_abi") != "classified-v2":
+    if core.get("dispatch_abi") != "classified-v3":
         classes = core.get("classes")
         if classes not in (["warp"],["cta"]):
             raise CacheMismatch("direct execution requires exactly one warp or CTA class")
@@ -175,5 +175,5 @@ def validate_optimization_spec(spec: ProgramSpec, metadata: dict[str, Any]) -> N
         if len(workers) != (3 if three_pass else 1) or core.get("workspace",[]) != expected_workspace:
             raise CacheMismatch("direct kernel count/workspace disagrees with the computation schedule")
     if spec.strategy == "naive" and (core.get("classes") != ["cta"]
-            or (core.get("dispatch_abi") == "classified-v2") != spec.debug_visits):
+            or (core.get("dispatch_abi") == "classified-v3") != spec.debug_visits):
         raise CacheMismatch("naive strategy requires CTA execution; only debug visits use classified dispatch")

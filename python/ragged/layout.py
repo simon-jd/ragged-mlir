@@ -15,7 +15,7 @@ from .errors import CacheMismatch, ValidationError
 I64_MAX = 2**63 - 1
 GRID_LIMITS = (2**31 - 1, 65535, 65535)
 WORKSPACE_DTYPES = {"i32": 4, "i64": 8, "f32": 4}
-SHAPE_SYMBOLS = frozenset(("N", "B", "D"))
+SHAPE_SYMBOLS = frozenset(("N", "B", "D", "B_split"))
 CLASSIFIED_GRID_SYMBOLS = frozenset(("ceil_B_128", "min_B_resident"))
 VALIDATION_GRID_SYMBOLS = frozenset(("ceil_B1_128",))
 
@@ -33,6 +33,20 @@ def valid_dimension(value: Any, symbols: frozenset[str]) -> bool:
             or (isinstance(value, str) and value in symbols))
 
 
+def split_capacity(metadata: dict[str, Any], *, n: int, b: int) -> int:
+    """An upper bound on the split queue's length, without reading device counters.
+
+    A segment reaches the split class only when it is longer than the bound of
+    every lower class present (thresholds pair with warp and cta), so at most
+    N // (T + 1) segments of N rows can be split, and never more than B.
+    """
+    classes = metadata.get("classes", [])
+    thresholds = metadata.get("thresholds", [])
+    lower = [bound for name, bound in zip(("warp", "cta"), thresholds) if name in classes]
+    bound = max(lower) if lower and all(type(value) is int and value >= 0 for value in lower) else 0
+    return min(b, n // (bound + 1))
+
+
 def resolve_layout(metadata: dict[str, Any], *, n: int, b: int, d: int,
                    workers: Mapping[str, int] | None = None
                    ) -> tuple[tuple[WorkspaceLayout, ...], tuple[tuple[int, int, int], ...], int]:
@@ -47,9 +61,9 @@ def resolve_layout(metadata: dict[str, Any], *, n: int, b: int, d: int,
             raise ValidationError(f"{name} must fit a nonnegative signed i64")
     if not 1 <= d <= 1024:
         raise ValidationError("D must lie in [1, 1024]")
-    dimensions = {"N": n, "B": b, "D": d,
+    dimensions = {"N": n, "B": b, "D": d, "B_split": split_capacity(metadata, n=n, b=b),
                   "ceil_B_128": b // 128 + (b % 128 != 0)}
-    classified = metadata.get("dispatch_abi") == "classified-v2"
+    classified = metadata.get("dispatch_abi") == "classified-v3"
     validation = metadata.get("abi") == "offsets-check-v1"
     if validation:
         if b == I64_MAX:
@@ -59,7 +73,7 @@ def resolve_layout(metadata: dict[str, Any], *, n: int, b: int, d: int,
     for workspace in metadata.get("workspace", []):
         shape = workspace["shape"]
         if any(not valid_dimension(value, SHAPE_SYMBOLS) for value in shape):
-            raise CacheMismatch("workspace dimensions must be static integers or N/B/D symbols")
+            raise CacheMismatch("workspace dimensions must be static integers or N/B/D/B_split symbols")
         concrete = tuple(dimensions[value] if isinstance(value, str) else value for value in shape)
         # Checking suffix products also establishes representable contiguous
         # strides when an earlier dynamic dimension is zero.

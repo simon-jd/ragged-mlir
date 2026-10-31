@@ -119,7 +119,7 @@ def test_real_classified_cubin_typed_workspace_and_cache(compiler, tmp_path, op,
     cache = ArtifactCache(tmp_path)
     program = compiler.compile(spec, cache)
     metadata = program.artifact.metadata
-    assert metadata["dispatch_abi"] == "classified-v2"
+    assert metadata["dispatch_abi"] == "classified-v3"
     assert metadata["classes"] == classes
     assert metadata["debug_visits"] is debug
     assert metadata["split_parts"] == 8
@@ -298,7 +298,7 @@ def test_pointwise_disable_has_no_extra_work_for_f32_identity_scale(compiler,tmp
 def test_naive_debug_preserves_instrumented_cta_dispatch(compiler,tmp_path):
     spec = ProgramSpec("softmax",feature_dim=7,strategy="naive",debug_visits=True)
     metadata = compiler.compile(spec,ArtifactCache(tmp_path)).artifact.metadata
-    assert metadata["classes"] == ["cta"] and metadata["dispatch_abi"] == "classified-v2"
+    assert metadata["classes"] == ["cta"] and metadata["dispatch_abi"] == "classified-v3"
     assert metadata["optimizations"]["effective"]["classification"] is True
 
 

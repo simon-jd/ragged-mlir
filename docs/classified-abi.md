@@ -1,9 +1,11 @@
 # Device-classified dispatch ABI
 
 This document fixes the compiler/runtime boundary for `dispatch_abi =
-"classified-v2"`. Version 2 differs from version 1 in two places: worker grids
+"classified-v3"`. Version 2 differs from version 1 in two places: worker grids
 are sized to the device (`min_B_resident` replaces `min(B, 256)`), and the
-worker chains of different segment classes may run concurrently. The kernel calling convention remains
+worker chains of different segment classes may run concurrently. Version 3
+indexes the split partials by split-queue position instead of segment ID, so
+they have `B_split` rows instead of `B`. The kernel calling convention remains
 `abi = "mlir-memref64-v1"`, with each memref expanded as described in `abi.md`.
 The existing single-class, non-debug warp/CTA ABI remains supported unchanged.
 This protocol describes implementation requirements, not evidence of GPU
@@ -13,7 +15,7 @@ execution correctness; GPU tests and sanitizer results are tracked separately.
 
 The manifest retains `schema: 1`, `classes`, `thresholds: [32,4096]`, `fusion`,
 `alias_safe`, `toolchain`, `kernels` and `workspace`. Classified manifests add
-`dispatch_abi: "classified-v2"`, `split_parts: 8`, `debug_visits: bool`, and
+`dispatch_abi: "classified-v3"`, `split_parts: 8`, `debug_visits: bool`, and
 `backend: "classified-persistent"`. All kernels take exactly the same argument
 list, in this order: `values`, `offsets`, `out`, optional `mask`, followed by the
 declared workspace list below. Optional workspaces are omitted from every
@@ -35,14 +37,20 @@ summarizes the list: `online` or
 | --- | --- | --- | --- |
 | `class_counts` | i64 | `[3]` | always |
 | `segment_ids` | i64 | `[3, "B"]` | always |
-| `partials` | f32 | `["B", 8*D]` | split class is active |
-| `partial_sums` | f32 | `["B", 8*D]` | split softmax uses online statistics |
+| `partials` | f32 | `["B_split", 8*D]` | split class is active |
+| `partial_sums` | f32 | `["B_split", 8*D]` | split softmax uses online statistics |
 | `max_stats` | f32 | `["B", D]` | softmax with a split class or a three-pass class |
 | `sum_stats` | f32 | `["B", D]` | softmax with a split class or a three-pass class |
 | `visits` | i32 | `["B"]` | `debug_visits = true` |
 | `logits` | f32 | `["N", D]` | scale/mask transformation is materialized |
 
-`D` and `8*D` above are emitted as concrete positive integer dimensions. The
+`D` and `8*D` above are emitted as concrete positive integer dimensions.
+`B_split` is `min(B, N // (T + 1))`, where `T` is the largest bound among the
+warp (32) and CTA (4,096) classes present: every split segment is longer than
+`T`, so no more than that many segments can be split, and the runtime sizes the
+buffers without reading a device counter. For D=128 softmax with 4,096
+segments of 262,144 rows that is 63 rows (0.5 MB for both buffers) instead of
+4,096 (33.6 MB). The
 symbolic workspace dimensions are `"B"` and, for logits, `"N"`. The runtime validates all
 shape products, byte counts, dtypes and argument order before allocating on the
 active CUDA stream. There is no expression interpreter in the manifest.
@@ -63,7 +71,8 @@ through shared memory cut the kernel further in an A/B run, 8.0 to 6.6 µs at
 D=1, but its 128-segment runs made the D=128 CTA workers slower than the
 warp's 32-segment runs; see [design-tradeoffs.md](design-tradeoffs.md).) Queue entries beyond the device
 counter are uninitialized and must never be read. Each queue has capacity B.
-`partials[original_segment, part*D + feature]` stores f32 partial results.
+`partials[position, part*D + feature]` stores f32 partial results, where
+`position` is the segment's position in the split queue.
 Three-pass softmax reuses this buffer for max then sum, separated by kernel
 boundaries. Online split softmax stores each part's exponential reference
 there and its mass, the exponential sum relative to that reference, at the
@@ -114,7 +123,9 @@ kernel, never on device counters.
 
 Workers of different classes read disjoint queue rows, process disjoint
 original segments, and write disjoint output rows and workspace rows
-(`partials`, `max_stats`, `sum_stats` and `visits` are indexed by segment). The
+(`max_stats`, `sum_stats` and `visits` are indexed by segment, `partials`
+and `partial_sums` by split-queue position, and only the split chain uses
+them). The
 runtime may therefore run the class chains concurrently: after `classify` it
 records an event on the caller's stream, launches the CTA chain and then the
 split chain on two streams that wait for it, launches the warp chain on the

@@ -3,9 +3,9 @@
 // Without hints every class uses online statistics. Each split part writes its
 // reference and mass; a combine kernel merges the eight parts before the
 // normalization kernel reads the merged statistics.
-// CHECK-DAG: ragged.dispatch_abi = "classified-v2"
-// CHECK-DAG: name = "partials", shape = ["B", 1024]
-// CHECK-DAG: name = "partial_sums", shape = ["B", 1024]
+// CHECK-DAG: ragged.dispatch_abi = "classified-v3"
+// CHECK-DAG: name = "partials", shape = ["B_split", 1024]
+// CHECK-DAG: name = "partial_sums", shape = ["B_split", 1024]
 // CHECK-DAG: name = "max_stats", shape = ["B", 128]
 // CHECK-DAG: name = "sum_stats", shape = ["B", 128]
 // CHECK-DAG: role = "warp_online"

@@ -25,8 +25,8 @@ def classified_manifest(feature_dim=7, schedule=THREE_PASS):
     workspace = [
         {"name": "class_counts", "shape": [3], "dtype": "i64"},
         {"name": "segment_ids", "shape": [3, "B"], "dtype": "i64"},
-        {"name": "partials", "shape": ["B", 8 * feature_dim], "dtype": "f32"},
-        *([{"name": "partial_sums", "shape": ["B", 8 * feature_dim], "dtype": "f32"}] if schedule[2] == "online" else []),
+        {"name": "partials", "shape": ["B_split", 8 * feature_dim], "dtype": "f32"},
+        *([{"name": "partial_sums", "shape": ["B_split", 8 * feature_dim], "dtype": "f32"}] if schedule[2] == "online" else []),
         {"name": "max_stats", "shape": ["B", feature_dim], "dtype": "f32"},
         {"name": "sum_stats", "shape": ["B", feature_dim], "dtype": "f32"},
         {"name": "visits", "shape": ["B"], "dtype": "i32"},
@@ -53,7 +53,7 @@ def classified_manifest(feature_dim=7, schedule=THREE_PASS):
                      ("normalize", 8)))
     for phase, parts in split_phases:
         kernel("split_" + phase, ["min_B_resident", feature_tiles, parts], segment_class="split")
-    metadata = {"schema": 1, "abi": "mlir-memref64-v1", "dispatch_abi": "classified-v2",
+    metadata = {"schema": 1, "abi": "mlir-memref64-v1", "dispatch_abi": "classified-v3",
         "backend": "classified-persistent", "classes": ["warp", "cta", "split"],
         "thresholds": [32, 4096], "split_parts": 8, "debug_visits": True,
         "fusion": schedule[0] if len(set(schedule)) == 1 else "mixed",
@@ -115,7 +115,7 @@ def test_online_split_mismatch_fails(mutation):
         kernels[-2]["grid"][2] = 8
     elif mutation == "partial_sums_without_online_split":
         _, _, metadata = classified_manifest(schedule=MIXED)
-        metadata["workspace"].insert(3, {"name": "partial_sums", "shape": ["B", 56], "dtype": "f32"})
+        metadata["workspace"].insert(3, {"name": "partial_sums", "shape": ["B_split", 56], "dtype": "f32"})
         for kernel in metadata["kernels"]:
             kernel["args"].insert(6, "partial_sums")
     with pytest.raises(CacheMismatch):
@@ -229,7 +229,8 @@ def test_worker_grid_cannot_omit_feature_tiles(d):
 def test_integer_ceiling_and_persistent_grid_boundaries(b, expected):
     _, _, metadata = classified_manifest()
     workers = {kernel["name"]: 200 + index for index, kernel in enumerate(metadata["kernels"][2:])}
-    workspaces, grids, nbytes = resolve_layout(metadata, n=0, b=b, d=7, workers=workers)
+    # Enough rows that every segment could be split: B_split == B.
+    workspaces, grids, nbytes = resolve_layout(metadata, n=4097 * b, b=b, d=7, workers=workers)
     assert grids[1] == (expected, 1, 1)
     assert [grid[0] for grid in grids[2:]] == [min(b, 200 + index) for index in range(len(grids) - 2)]
     # Typed bytes: counters, three worklists, eight partials, two statistics,
@@ -256,7 +257,7 @@ def test_total_workspace_bytes_cannot_overflow_across_individually_valid_buffers
 
 @pytest.mark.parametrize("b", [128 * (2**31 - 1) + 1, 2**63 - 1])
 def test_classifier_grid_overflow_does_not_wrap(b):
-    metadata = {"dispatch_abi": "classified-v2", "workspace": [],
+    metadata = {"dispatch_abi": "classified-v3", "workspace": [],
                 "kernels": [{"grid": ["ceil_B_128", 1, 1]}]}
     with pytest.raises(ValidationError, match="grid"):
         resolve_layout(metadata, n=0, b=b, d=1)
@@ -276,3 +277,13 @@ def test_invalid_host_dimensions_fail_preflight(field, value):
     _, _, metadata = classified_manifest()
     with pytest.raises(ValidationError):
         resolve_layout(metadata, **dimensions)
+
+
+@pytest.mark.parametrize("n,b,rows", [(0, 64, 0), (4096, 64, 0), (4097 * 3, 64, 3), (262144, 4096, 63), (10**9, 64, 64)])
+def test_split_partials_have_one_row_per_possible_split_segment(n, b, rows):
+    _, _, metadata = classified_manifest()
+    workers = {kernel["name"]: 4 for kernel in metadata["kernels"][2:]}
+    workspaces, _, _ = resolve_layout(metadata, n=n, b=b, d=7, workers=workers)
+    partials = next(item for item in workspaces if item.name == "partials")
+    # A split segment is longer than the CTA bound (4,096 rows).
+    assert partials.shape == (rows, 56) and partials.nbytes == rows * 56 * 4

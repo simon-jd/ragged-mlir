@@ -58,7 +58,8 @@ def test_classified_mask_keeps_all_workspace_arguments_after_four_inputs(host_cu
                          stream=env.consumer,debug_buffers=buffers)
     assert len(env.calls) == 13 and all(len(call[5]) == 64 for call in env.calls)
     assert all(call[5][26:31] == [buffers["class_counts"].pointer]*2+[0,3,1] for call in env.calls)
-    assert report.workspace_bytes == 24 + 5*(24+8*33*4+2*33*4+4)
+    # No segment of these 10 rows can be split, so the split partials are empty.
+    assert report.workspace_bytes == 24 + 5*(24+2*33*4+4)
 
 
 @pytest.mark.parametrize("problem", ["wrong_dtype","broadcast","rank","noncontiguous","cpu","device","grad","out","partial_out","offsets"])

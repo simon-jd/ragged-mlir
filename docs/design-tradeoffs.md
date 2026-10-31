@@ -33,7 +33,7 @@ checks before it launches anything.
 
 **Cost.** An LLVM/MLIR 23 build dependency, compile time on first use of a
 specialization, and an ABI between the compiler and the runtime that has to
-be versioned (`classified-v2`) and validated.
+be versioned (`classified-v3`) and validated.
 
 ## Three segment classes, chosen on the device
 

@@ -117,7 +117,7 @@ public:
              Value segmentOverride = {}, Value maximumStats = {},
              Value totalStats = {}, Value partialBuffer = {},
              Value partId = {}, bool useShuffle = false, Value mask = {}, Value logits = {},
-             Value partialSumBuffer = {})
+             Value partialSumBuffer = {}, Value partialIndex = {})
       : b(builder), loc(source.getLoc()), source(source), threads(threads),
         tile(tile), useShuffle(useShuffle), values(args[0]), offsets(args[1]),
         out(args[2]), shared(shared), maxStats(maximumStats), sumStats(totalStats),
@@ -125,6 +125,9 @@ public:
     zero = index(b, loc, 0); one = index(b, loc, 1);
     tid = b.create<gpu::ThreadIdOp>(loc, gpu::Dimension::x);
     segment = segmentOverride ? segmentOverride : Value(b.create<gpu::BlockIdOp>(loc, gpu::Dimension::x));
+    // Split partials are indexed by split-queue position, not segment ID, so
+    // the buffers need only as many rows as there can be split segments.
+    partialRow = partialIndex ? partialIndex : segment;
     Value dBlock = b.create<gpu::BlockIdOp>(loc, gpu::Dimension::y);
     Value tileValue = index(b, loc, tile);
     featureLane = b.create<arith::RemUIOp>(loc, tid, tileValue);
@@ -169,8 +172,8 @@ public:
       int64_t d = cast<MemRefType>(values.getType()).getDimSize(1);
       Value column = b.create<arith::AddIOp>(loc, feature,
           b.create<arith::MulIOp>(loc, part, index(b, loc, d)));
-      storeLeader(stats.first, partials, false, column);
-      storeLeader(stats.second, partialSums, false, column);
+      storeLeader(stats.first, partials, false, column, partialRow);
+      storeLeader(stats.second, partialSums, false, column, partialRow);
     } else if (phase == "combine_online") {
       combineOnline();
     } else if (phase.starts_with("combine_")) {
@@ -182,7 +185,7 @@ public:
       int64_t d = cast<MemRefType>(values.getType()).getDimSize(1);
       Value column = b.create<arith::AddIOp>(loc, feature,
           b.create<arith::MulIOp>(loc, part, index(b, loc, d)));
-      storeLeader(result, partials, false, column);
+      storeLeader(result, partials, false, column, partialRow);
     } else if (phase == "sum" || phase == "max") {
       Value result = reduce(phase, Value());
       storeLeader(result, out, true);
@@ -268,7 +271,7 @@ private:
           b.setInsertionPoint(nested.getInsertionBlock(), nested.getInsertionPoint());
           Value column = b.create<arith::AddIOp>(loc, feature,
               b.create<arith::MulIOp>(loc, p, index(b, loc, d)));
-          Value value = b.create<memref::LoadOp>(loc, partials, ValueRange{segment, column});
+          Value value = b.create<memref::LoadOp>(loc, partials, ValueRange{partialRow, column});
           if (maximum) {
             b.create<scf::YieldOp>(loc, b.create<arith::MaximumFOp>(loc, iter[0], value).getResult());
           } else {
@@ -305,12 +308,12 @@ private:
           }).getResults();
       };
       Value reference = overParts(ValueRange{minusInf}, [&](ValueRange iter, Value at) -> SmallVector<Value> {
-        Value partReference = b.create<memref::LoadOp>(loc, partials, ValueRange{segment, at});
+        Value partReference = b.create<memref::LoadOp>(loc, partials, ValueRange{partialRow, at});
         return {b.create<arith::MaximumFOp>(loc, iter[0], partReference)};
       })[0];
       Value total = overParts(ValueRange{zeroFloat, zeroFloat}, [&](ValueRange iter, Value at) -> SmallVector<Value> {
-        Value partReference = b.create<memref::LoadOp>(loc, partials, ValueRange{segment, at});
-        Value mass = b.create<memref::LoadOp>(loc, partialSums, ValueRange{segment, at});
+        Value partReference = b.create<memref::LoadOp>(loc, partials, ValueRange{partialRow, at});
+        Value mass = b.create<memref::LoadOp>(loc, partialSums, ValueRange{partialRow, at});
         Value scaled = b.create<arith::MulFOp>(loc, mass, b.create<math::ExpOp>(loc,
             b.create<arith::SubFOp>(loc, partReference, reference)));
         Value empty = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, partReference, minusInf);
@@ -506,13 +509,13 @@ private:
     }
     return b.create<memref::LoadOp>(loc, shared, ValueRange{featureLane});
   }
-  void storeLeader(Value result, Value buffer, bool castOutput, Value column = {}) {
+  void storeLeader(Value result, Value buffer, bool castOutput, Value column = {}, Value row = {}) {
     Value leader = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rowLane, zero);
     Value active = b.create<arith::AndIOp>(loc, leader, validFeature);
     when(b, loc, active, [&] {
       if (castOutput && !cast<MemRefType>(out.getType()).getElementType().isF32())
         result = b.create<arith::TruncFOp>(loc, cast<MemRefType>(out.getType()).getElementType(), result);
-      b.create<memref::StoreOp>(loc, result, buffer, ValueRange{segment, column ? column : feature});
+      b.create<memref::StoreOp>(loc, result, buffer, ValueRange{row ? row : segment, column ? column : feature});
     });
   }
   void normalize(Value maximum, Value total) {
@@ -538,6 +541,7 @@ private:
   int64_t threads, tile, unroll;
   bool useShuffle;
   Value values, offsets, out, shared, maxStats, sumStats, partials, partialSums, part, mask, logits;
+  Value partialRow;
   Value zero, one, tid, segment, featureLane, rowLane, feature, validFeature;
   Value start, end, firstRow, rowStep;
 };
@@ -571,10 +575,12 @@ public:
     if (map.getMask()) names.push_back(b.getStringAttr("mask"));
     addWorkspace("class_counts", "i64", b.getI64Type(), {3});
     addWorkspace("segment_ids", "i64", b.getI64Type(), {3, ShapedType::kDynamic});
-    if (hasSplit) addWorkspace("partials", "f32", b.getF32Type(), {ShapedType::kDynamic, 8 * d});
+    // One row per possible split segment: B_split = min(B, N / (T + 1)) for
+    // the largest lower-class bound T, since every split segment is longer.
+    if (hasSplit) addWorkspace("partials", "f32", b.getF32Type(), {ShapedType::kDynamic, 8 * d}, "B_split");
     // Split is the last class; its online parts keep a mass beside each reference.
     if (operation == "softmax" && hasSplit && online.back())
-      addWorkspace("partial_sums", "f32", b.getF32Type(), {ShapedType::kDynamic, 8 * d});
+      addWorkspace("partial_sums", "f32", b.getF32Type(), {ShapedType::kDynamic, 8 * d}, "B_split");
     if (operation == "softmax" && (hasSplit || llvm::is_contained(online, false))) {
       addWorkspace("max_stats", "f32", b.getF32Type(), {ShapedType::kDynamic, d});
       addWorkspace("sum_stats", "f32", b.getF32Type(), {ShapedType::kDynamic, d});
@@ -811,7 +817,7 @@ private:
                            segment, argument("max_stats"), argument("sum_stats"),
                            argument("partials"), part, segmentClass == "warp" && enabled(map, "shuffle"),
                            map.getMask() ? Value(function.getArgument(3)) : Value(), argument("logits"),
-                           argument("partial_sums"));
+                           argument("partial_sums"), segmentClass == "split" ? position : Value());
         emitter.emit(phase);
         bool finalOutput = phase == "sum" || phase == "max" || phase == "online" ||
                            phase == "normalize" || phase == "combine_sum" || phase == "combine_max";
@@ -1056,7 +1062,7 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
       if (classified) {
         ClassifiedEmitter emitter(b, gpuModule, dispatch, dispatchId, manifest);
         module->setAttr("ragged.workspace", emitter.emit());
-        module->setAttr("ragged.dispatch_abi", b.getStringAttr("classified-v2"));
+        module->setAttr("ragged.dispatch_abi", b.getStringAttr("classified-v3"));
         module->setAttr("ragged.split_parts", b.getI64IntegerAttr(8));
         auto debug = map->getAttrOfType<BoolAttr>("debug_visits");
         module->setAttr("ragged.debug_visits", b.getBoolAttr(debug && debug.getValue()));

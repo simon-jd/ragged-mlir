@@ -1,7 +1,7 @@
 // RUN: ragged-opt %s -ragged-pipeline | FileCheck %s
 // CHECK-DAG: ragged.debug_visits = true
 // CHECK-DAG: name = "visits", shape = ["B"]
-// CHECK-DAG: name = "partials", shape = ["B", 56]
+// CHECK-DAG: name = "partials", shape = ["B_split", 56]
 // CHECK-LABEL: gpu.func @ragged_0_split_combine_sum
 // CHECK: gpu.grid_dim x
 // CHECK: scf.for

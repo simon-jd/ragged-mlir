@@ -1,5 +1,5 @@
 // RUN: ragged-opt %s -ragged-pipeline | FileCheck %s
-// CHECK-DAG: ragged.dispatch_abi = "classified-v2"
+// CHECK-DAG: ragged.dispatch_abi = "classified-v3"
 // CHECK-DAG: role = "warp_online"
 // CHECK-DAG: role = "cta_online"
 // CHECK-NOT: partials

@@ -24,13 +24,13 @@ def controlled_program(options=None, *, base=None, scale=0.5):
     tile = options.resolved_tile(spec.feature_dim)
     metadata.update(d_tile=tile,pointwise_materialized=materialized)
     metadata["optimizations"] = {"requested":options.to_dict(),"effective":{
-        "classification":metadata.get("dispatch_abi") == "classified-v2",
+        "classification":metadata.get("dispatch_abi") == "classified-v3",
         "online_fusion":metadata.get("fusion") == "online", "warp_mapping":"warp" in metadata["classes"],
         "split_mapping":"split" in metadata["classes"], "shuffle":"warp" in metadata["classes"] and options.shuffle,
         "pointwise_fusion":options.pointwise_fusion and (spec.mask or scale != 1),
         "row_pipelining":options.row_pipelining}}
     for index,kernel in enumerate(metadata["kernels"]):
-        if metadata.get("dispatch_abi") != "classified-v2" or index >= 2:
+        if metadata.get("dispatch_abi") != "classified-v3" or index >= 2:
             kernel["grid"][1] = (spec.feature_dim + tile - 1)//tile
     if materialized:
         metadata["workspace"].append({"name":"logits","dtype":"f32","shape":["N",spec.feature_dim]})

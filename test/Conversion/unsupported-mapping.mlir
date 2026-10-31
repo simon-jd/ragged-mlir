@@ -2,9 +2,9 @@
 // Unbounded lengths now produce real queues and eight-way split stages; every
 // class uses online statistics.
 // CHECK-DAG: ragged.backend = "classified-persistent"
-// CHECK-DAG: ragged.dispatch_abi = "classified-v2"
+// CHECK-DAG: ragged.dispatch_abi = "classified-v3"
 // CHECK-DAG: grid = ["min_B_resident", 4, 8]
-// CHECK-DAG: name = "partials", shape = ["B", 1024]
+// CHECK-DAG: name = "partials", shape = ["B_split", 1024]
 // CHECK-DAG: gpu.func @ragged_0_split_normalize
 // CHECK-DAG: gpu.func @ragged_0_split_combine_online
 // CHECK-DAG: gpu.func @ragged_0_split_partial_online

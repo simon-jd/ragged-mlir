@@ -119,7 +119,7 @@ def _launch_schedule(metadata: dict[str, Any]) -> tuple[tuple[int, ...], tuple[t
     disjoint queue rows, segments and workspace rows (classified-abi.md), so
     their chains may run concurrently once classification has finished."""
     kernels = metadata["kernels"]
-    if metadata.get("dispatch_abi") != "classified-v2":
+    if metadata.get("dispatch_abi") != "classified-v3":
         return tuple(range(len(kernels))), ()
     prologue, chains = [], {}
     for index, kernel in enumerate(kernels):
@@ -224,7 +224,7 @@ class CompiledProgram:
                 or artifact.metadata.get("compiler_sha256") != artifact.key.compiler_sha256):
             raise CacheMismatch("kernel manifest is not bound to the compiler executable hash")
         workspace = computation_metadata(artifact.metadata).get("workspace", [])
-        if artifact.metadata.get("dispatch_abi") == "classified-v2":
+        if artifact.metadata.get("dispatch_abi") == "classified-v3":
             self._validate_classified_spec(spec, artifact.metadata)
         elif spec.debug_visits or artifact.metadata.get("debug_visits", False):
             raise CacheMismatch("debug visits require the classified dispatch ABI")
@@ -295,9 +295,9 @@ class CompiledProgram:
                      {"name": "segment_ids", "shape": [3, "B"], "dtype": "i64"}]
         split_online = schedule is not None and "split" in classes and schedule[-1] == "online"
         if "split" in classes:
-            workspace.append({"name": "partials", "shape": ["B", 8 * spec.feature_dim], "dtype": "f32"})
+            workspace.append({"name": "partials", "shape": ["B_split", 8 * spec.feature_dim], "dtype": "f32"})
         if split_online:
-            workspace.append({"name": "partial_sums", "shape": ["B", 8 * spec.feature_dim], "dtype": "f32"})
+            workspace.append({"name": "partial_sums", "shape": ["B_split", 8 * spec.feature_dim], "dtype": "f32"})
         if schedule is not None and ("three_pass" in schedule or "split" in classes):
             workspace.extend({"name": name, "shape": ["B", spec.feature_dim], "dtype": "f32"}
                              for name in ("max_stats", "sum_stats"))
@@ -340,9 +340,9 @@ class CompiledProgram:
         if metadata.get("mask", False) and metadata.get("fusion") == "not_applicable":
             raise CacheMismatch("additive mask is only supported by softmax schedules")
         dispatch_abi = metadata.get("dispatch_abi")
-        if dispatch_abi not in (None, "classified-v2"):
+        if dispatch_abi not in (None, "classified-v3"):
             raise CacheMismatch("unsupported dispatch ABI")
-        classified = dispatch_abi == "classified-v2"
+        classified = dispatch_abi == "classified-v3"
         if type(metadata.get("debug_visits", False)) is not bool:
             raise CacheMismatch("debug_visits must be boolean")
         declared_bytes = metadata.get("workspace_bytes", 0)
@@ -480,9 +480,9 @@ class CompiledProgram:
         widths = [metadata["workspace"][-1]["shape"][1]] if metadata.get("pointwise_materialized",False) else []
         for buffer in workspace[2:]:
             if buffer["name"] in ("partials", "partial_sums"):
-                if (buffer["dtype"] != "f32" or len(buffer["shape"]) != 2 or buffer["shape"][0] != "B"
+                if (buffer["dtype"] != "f32" or len(buffer["shape"]) != 2 or buffer["shape"][0] != "B_split"
                         or type(buffer["shape"][1]) is not int or buffer["shape"][1] % 8):
-                    raise CacheMismatch("split partials must be f32[B,8*D]")
+                    raise CacheMismatch("split partials must be f32[B_split,8*D]")
                 widths.append(buffer["shape"][1] // 8)
             elif buffer["name"] in ("max_stats", "sum_stats"):
                 if buffer["dtype"] != "f32" or len(buffer["shape"]) != 2 or buffer["shape"][0] != "B":
