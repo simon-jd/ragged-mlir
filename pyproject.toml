@@ -1,0 +1,31 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.4"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "ragged-mlir"
+version = "0.1.0"
+description = "Out-of-tree MLIR compiler frontend for segmented tensors"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["numpy>=1.26", "pytest>=8"]
+torch = ["torch==2.14.1"]
+native = ["nanobind>=2.4", "cmake>=3.25", "ninja"]
+
+[project.scripts]
+ragged = "ragged.cli:main"
+
+[tool.scikit-build]
+cmake.source-dir = "runtime"
+cmake.build-type = "Release"
+wheel.packages = ["python/ragged"]
+build-dir = "build-wheel/{wheel_tag}"
+sdist.include = ["runtime/**", "python/ragged/**", "pyproject.toml"]
+sdist.exclude = ["python/ragged/*.so", "build*/**", ".deps/**", ".venv/**"]
+
+[tool.pytest.ini_options]
+testpaths = ["test/python"]
+pythonpath = ["python", "."]
+markers = ["cuda_loader_api_fault: isolated real cuModuleLoadData rejection; only this sanitizer stage uses the exact API suppression file"]

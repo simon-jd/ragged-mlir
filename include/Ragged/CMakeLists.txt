@@ -1,0 +1,6 @@
+set(LLVM_TARGET_DEFINITIONS RaggedOps.td)
+mlir_tablegen(RaggedOps.h.inc -gen-op-decls)
+mlir_tablegen(RaggedOps.cpp.inc -gen-op-defs)
+mlir_tablegen(RaggedDialect.h.inc -gen-dialect-decls -dialect=ragged)
+mlir_tablegen(RaggedDialect.cpp.inc -gen-dialect-defs -dialect=ragged)
+add_public_tablegen_target(RaggedIncGen)
