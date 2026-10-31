@@ -23,8 +23,9 @@ class NativeBaselines:
         self.lib.ragged_naive.argtypes = [integer, integer, wide, wide, ptr, ptr, ptr, ptr]
         self.lib.ragged_cub_reduce.argtypes = [integer, integer, wide, ptr, ptr, ptr, ptr,
                                              ctypes.POINTER(ctypes.c_size_t), ptr]
-        self.lib.ragged_cub_transform.argtypes = [integer, integer, wide, ptr, ptr, ptr, ptr, ptr]
-        for name in ('ragged_naive', 'ragged_cub_reduce', 'ragged_cub_transform'):
+        self.lib.ragged_cub_shifted_exp.argtypes = [integer, wide, wide, ptr, ptr, ptr, ptr, ptr, ptr]
+        self.lib.ragged_cub_normalize.argtypes = [wide, ptr, ptr, ptr, ptr, ptr]
+        for name in ('ragged_naive', 'ragged_cub_reduce', 'ragged_cub_shifted_exp', 'ragged_cub_normalize'):
             getattr(self.lib, name).restype = integer
         version = self.lib.ragged_baseline_version()
         if version != 300500:
@@ -79,15 +80,18 @@ class NativeBaselines:
             elif op != 'softmax':
                 self._reduce(OP_CODES[op], bits, b, promoted, offsets, output, ptr, torch)
             else:
+                # CUB max, element-parallel exp(x - max), CUB sum, element-parallel division.
                 maximum = torch.empty((b, 1), dtype=torch.float32, device=values.device)
                 total = torch.empty_like(maximum)
                 exp_values = torch.empty_like(promoted)
+                segment_ids = torch.empty((n,), dtype=torch.int32, device=values.device)
                 self._reduce(1, bits, b, promoted, offsets, maximum, ptr, torch)
-                self._check(self.lib.ragged_cub_transform(0, bits, b, promoted.data_ptr(), offsets.data_ptr(),
-                                                         maximum.data_ptr(), exp_values.data_ptr(), ptr))
+                self._check(self.lib.ragged_cub_shifted_exp(bits, b, n, promoted.data_ptr(), offsets.data_ptr(),
+                                                            maximum.data_ptr(), exp_values.data_ptr(),
+                                                            segment_ids.data_ptr(), ptr))
                 self._reduce(0, bits, b, exp_values, offsets, total, ptr, torch)
-                self._check(self.lib.ragged_cub_transform(1, bits, b, exp_values.data_ptr(), offsets.data_ptr(),
-                                                         total.data_ptr(), output.data_ptr(), ptr))
+                self._check(self.lib.ragged_cub_normalize(n, exp_values.data_ptr(), segment_ids.data_ptr(),
+                                                          total.data_ptr(), output.data_ptr(), ptr))
             # Foreign kernels do not automatically notify Torch's allocator.
             # Temporaries are allocated and consumed on this same current stream.
             values.record_stream(stream)

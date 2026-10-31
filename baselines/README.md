@@ -14,14 +14,22 @@ for empty segments, outputs cast back to the input dtype, offsets assumed valid
   that padded tensor can be far larger than the packed input. The benchmark
   passes `min_seqlen`/`max_seqlen` only with `--length-hints`; without them
   the eager sum and max pad every segment to the total row count.
-- `cuda/baselines.cu` and `native.py`: a one-block-per-segment CUDA kernel
-  whose 128 threads loop over feature columns (compensated f32 sums), so at
-  D=1 one thread of each block does all the work; CUB 3.5
-  `DeviceSegmentedReduce` sum and max with a NaN-propagating max operator, at
-  D=1; and, at D=1, a softmax made of two CUB reductions (the maximum, then the
-  sum of exponentials) and two one-block-per-segment kernels (the
-  exponentials, the normalization). Each call includes bf16 promotion, CUB
-  workspace queries and allocation, every kernel and the output cast.
+- `cuda/baselines.cu` and `native.py`:
+  - `cuda-naive`: one 256-thread block per segment. The threads form up to 32
+    feature lanes (contiguous columns for a warp) times 256/lanes row lanes,
+    so at D=1 all 256 threads stride over the rows and at D=128 eight row
+    lanes cover 32 columns at a time. Each thread folds its rows (compensated
+    f32 sums, NaN-propagating max) and a shared-memory tree combines the row
+    lanes. Softmax makes three passes over the segment (max, sum of
+    exponentials, normalize) inside the same block.
+  - `cub`, at D=1: CUB 3.5 `DeviceSegmentedReduce` sum and max with a
+    NaN-propagating max operator. Softmax is CUB's segmented max, an
+    element-parallel kernel for `exp(x - max)` that finds each element's
+    segment by binary search over the offsets, CUB's segmented sum of those
+    values, and an element-parallel division.
+
+  Each call includes bf16 promotion, CUB workspace queries and allocation,
+  every kernel and the output cast.
 - `triton_reference.py`: a handwritten Triton 3.8 kernel, 32-row tiles and up
   to 32 feature columns per program, one program per segment and feature tile;
   softmax uses max, denominator and normalize kernels. Sum uses lane

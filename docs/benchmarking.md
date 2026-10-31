@@ -45,8 +45,8 @@ the measurement), so a rerun writes a new directory rather than one under
 | `ragged-naive` | this compiler, one block per segment |
 | `torch-segment` | `torch.segment_reduce` (sum and max) with f32 accumulation |
 | `njt-eager`, `njt-compile` | `torch.nested` jagged tensors, eager and `torch.compile(fullgraph=True)`; max pads explicitly with `-inf` because NJT's own padding breaks empty and all-`-inf` segments |
-| `cuda-naive` | a one-block-per-segment CUDA kernel whose threads loop over feature columns, so at D=1 one thread per block works (`baselines/cuda/baselines.cu`) |
-| `cub` | CUB 3.5 `DeviceSegmentedReduce` sum and max; softmax as CUB max and sum reductions plus two one-block-per-segment kernels for exp and normalize (D=1 only) |
+| `cuda-naive` | one 256-thread CUDA block per segment, threads over rows and up to 32 feature columns, shared-memory tree (`baselines/cuda/baselines.cu`) |
+| `cub` | CUB 3.5 `DeviceSegmentedReduce` sum and max; softmax as CUB max, element-parallel exp, CUB sum and element-parallel division (D=1 only) |
 | `triton` | a handwritten Triton kernel, one program per segment and feature tile, fixed 32-row tiles, no autotuning, isolated cache per run |
 | `fbgemm` | FBGEMM 1.8 `jagged_softmax`, when installed |
 
