@@ -198,3 +198,26 @@ def test_source_debug_mismatch_cannot_publish(compiler_transport, tmp_path):
     with pytest.raises(CacheMismatch, match="debug visits"):
         compiler.compile(ProgramSpec("sum", debug_visits=True), ArtifactCache(tmp_path))
     assert not list(tmp_path.rglob("manifest.json"))
+
+
+def test_compiler_hash_is_computed_once_per_file_version(tmp_path, monkeypatch):
+    import hashlib
+    import os
+    import ragged.compiler as frontend
+    executable = tmp_path / "ragged-compile"
+    executable.write_bytes(b"first build")
+    executable.chmod(0o755)
+    calls = []
+    digest = hashlib.file_digest
+    monkeypatch.setattr(frontend.hashlib, "file_digest",
+                        lambda handle, name: calls.append(name) or digest(handle, name))
+    compiler = Compiler(str(executable))
+    first = compiler._compiler_hash()
+    assert compiler._compiler_hash() == first
+    assert Compiler(str(executable))._compiler_hash() == first
+    assert len(calls) == 1
+    executable.write_bytes(b"second build, longer")
+    os.utime(executable, ns=(1, 1))
+    second = compiler._compiler_hash()
+    assert second != first and second == hashlib.sha256(b"second build, longer").hexdigest()
+    assert len(calls) == 2

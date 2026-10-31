@@ -27,6 +27,12 @@ class CompilationResult:
     command: tuple[str, ...]
 
 
+# sha256 of each compiler executable this process has identified, keyed by the
+# file's identity. Hashing a statically linked compiler (about 220 MB) costs
+# about 0.1 s, so it happens once per file version instead of on every call.
+_EXECUTABLE_DIGESTS: dict[tuple, str] = {}
+
+
 class Compiler:
     def __init__(self, executable: str | os.PathLike[str] | None = None, *, timeout: float = 300):
         self.executable = str(executable or os.environ.get("RAGGED_COMPILE", "ragged-compile"))
@@ -40,9 +46,18 @@ class Compiler:
         return executable
 
     def _compiler_hash(self) -> str:
+        """sha256 of the executable, recomputed whenever the file is replaced or rewritten."""
         try:
-            with open(self._executable(), "rb") as executable:
-                return hashlib.file_digest(executable, "sha256").hexdigest()
+            path = self._executable()
+            with open(path, "rb") as executable:
+                status = os.fstat(executable.fileno())
+                identity = (os.path.realpath(path), status.st_dev, status.st_ino, status.st_size,
+                            status.st_mtime_ns, status.st_ctime_ns)
+                digest = _EXECUTABLE_DIGESTS.get(identity)
+                if digest is None:
+                    digest = hashlib.file_digest(executable, "sha256").hexdigest()
+                    _EXECUTABLE_DIGESTS[identity] = digest
+                return digest
         except OSError as exc:
             raise ToolchainUnavailable(f"cannot identify actual compiler binary: {exc}") from exc
 
