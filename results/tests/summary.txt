@@ -1,0 +1,12 @@
+Test runs on home-ubuntu (RTX 4090, driver 595.99, CUDA 13.2).
+
+GPU tests at commit 8ed1380cfef61320b7b818df571bdfb823912b46, the commit the benchmark measured
+(PyTorch 2.14.1+cu132, Triton 3.8.0; FBGEMM not installed, so its cases skip):
+  PYTHONPATH=python:. RAGGED_COMPILE=build/bin/ragged-compile python -m pytest test/gpu
+  2,044 passed, 164 skipped, 0 failed in 6.2 min
+
+Host tests and lit tests at commit e21d704, which adds only the chart and per-seed medians to 8ed1380:
+  python -m pytest                  (test/python, CPU PyTorch 2.14.1)   1,706 passed
+  ninja -C build check-ragged       (lit/FileCheck)                      40 passed
+
+compute-sanitizer runs: ../sanitizer/summary.txt.
