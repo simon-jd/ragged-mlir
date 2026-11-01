@@ -4,7 +4,9 @@ For every (group, case, method) and L2 state, each run (one seed and
 repetition, one process) contributes the median of its timed calls. The
 summary reports the median of those per-run medians and their interquartile
 range (25th and 75th percentiles), in microseconds, with the number of runs
-and seeds. A method that did not measure in every run lists its statuses.
+and the median of each seed's runs (seeds change the segment lengths, which
+on the long-tail inputs changes the longest segment by an order of
+magnitude). A method that did not measure in every run lists its statuses.
 
     python -m bench.summarize RUNS --output results/bench/summary.json
 """
@@ -62,7 +64,7 @@ def summarize(root: Path) -> dict:
             seeds[key][seed] = [info.get("min_length"), info.get("max_length")]
         for cell in report.get("methods", []):
             statuses[(key, cell["method"])][cell["status"]] += 1
-            cells[key][cell["method"]].append(cell)
+            cells[key][cell["method"]].append({**cell, "_seed": seed})
     summary = []
     for key in sorted(cells):
         entry = {"group": key[0], "case": key[1], **cases.get(key, {}),
@@ -74,6 +76,12 @@ def summarize(root: Path) -> dict:
                 medians = [timing(cell)["median"] * 1e3 for cell in measured if timing(cell)]
                 if medians:
                     record[mode] = _spread(medians)
+                    by_seed = defaultdict(list)
+                    for cell in measured:
+                        if timing(cell):
+                            by_seed[cell["_seed"]].append(timing(cell)["median"] * 1e3)
+                    record[mode]["by_seed_median_us"] = {seed: round(float(np.median(values)), 2)
+                                                         for seed, values in sorted(by_seed.items())}
             reasons = sorted({cell.get("reason") or cell.get("error", "")[:200] for cell in method_cells
                               if cell["status"] != "measured"})
             if reasons:

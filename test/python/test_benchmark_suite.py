@@ -112,7 +112,8 @@ def test_summary_is_the_median_and_quartiles_of_per_run_medians(tmp_path):
     main, ablation = sorted(summary["cases"], key=lambda entry: entry["group"], reverse=True)
     assert (main["group"], ablation["group"]) == ("main", "ablation/serial-classes")
     ragged = main["methods"]["ragged-auto"]
-    assert ragged["warm"] == {"median_us": 13.0, "p25_us": 11.5, "p75_us": 14.5, "runs": 4}
+    assert ragged["warm"] == {"median_us": 13.0, "p25_us": 11.5, "p75_us": 14.5, "runs": 4,
+                              "by_seed_median_us": {"711": 12.0, "712": 14.0}}
     assert ragged["cold"]["median_us"] == 26.0
     cub = main["methods"]["cub"]
     assert cub["statuses"] == {"failed": 1, "measured": 3} and cub["warm"]["runs"] == 3 and "cold" not in cub
