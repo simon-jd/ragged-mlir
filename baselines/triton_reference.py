@@ -5,8 +5,9 @@ keeps the fastest configuration (block rows, feature tile, warps, chunk):
 
 - ``segment``: one program per (segment, feature tile) loops over the rows.
 - ``chunked``: every segment is cut into chunks of at most CHUNK rows, one
-  program each, so a long segment is spread over many SMs. A one-program map
-  kernel builds the chunk-to-segment table on the device (no host readback);
+  program each, so a long segment is spread over many SMs. Two small kernels
+  (per-tile chunk counts, then a scan and fill) build the chunk-to-segment
+  table on the device (no host readback);
   chunks of multi-chunk segments write partial results that a combine kernel
   merges, while single-chunk segments write their result directly.
 
@@ -130,21 +131,37 @@ def _segment_kernel(X, Offsets, Out, D: tl.constexpr, OP: tl.constexpr,
 
 
 @triton.jit
-def _map_kernel(Offsets, Starts, ChunkSegment, B, CHUNK: tl.constexpr, TILE: tl.constexpr):
-    """Starts[s] = first chunk of segment s (max(1, ceil(len/CHUNK)) each); the table maps chunks to segments."""
+def _chunk_counts(Offsets, B, index, CHUNK: tl.constexpr):
+    valid = index < B
+    begin = tl.load(Offsets + index, valid, other=0).to(tl.int64)
+    end = tl.load(Offsets + index + 1, valid, other=0).to(tl.int64)
+    return tl.where(valid, tl.maximum((end - begin + CHUNK - 1) // CHUNK, 1), 0)
+
+
+@triton.jit
+def _count_kernel(Offsets, TileCounts, B, CHUNK: tl.constexpr, TILE: tl.constexpr):
+    """Chunks per tile of TILE segments: max(1, ceil(length / CHUNK)) per segment."""
+    tile = tl.program_id(0).to(tl.int64)
+    count = _chunk_counts(Offsets, B, tile * TILE + tl.arange(0, TILE).to(tl.int64), CHUNK)
+    tl.store(TileCounts + tile, tl.sum(count, 0))
+
+
+@triton.jit
+def _map_kernel(Offsets, TileCounts, Starts, ChunkSegment, B, CHUNK: tl.constexpr, TILE: tl.constexpr):
+    """Starts[s] = first chunk of segment s, Starts[B] = chunk count; the table maps chunks to segments."""
+    tile = tl.program_id(0).to(tl.int64)
     carry = tl.full([], 0, tl.int64)
-    for base in range(0, B, TILE):
-        index = base + tl.arange(0, TILE).to(tl.int64)
-        valid = index < B
-        begin = tl.load(Offsets + index, valid, other=0).to(tl.int64)
-        end = tl.load(Offsets + index + 1, valid, other=0).to(tl.int64)
-        count = tl.where(valid, tl.maximum((end - begin + CHUNK - 1) // CHUNK, 1), 0)
-        start = carry + tl.cumsum(count, 0) - count
-        tl.store(Starts + index, start, valid)
-        for k in range(0, tl.max(count, 0)):
-            tl.store(ChunkSegment + start + k, index.to(tl.int32), valid & (k < count))
-        carry += tl.sum(count, 0)
-    tl.store(Starts + B, carry)
+    for base in range(0, tile, TILE):
+        earlier = base + tl.arange(0, TILE).to(tl.int64)
+        carry += tl.sum(tl.load(TileCounts + earlier, earlier < tile, other=0), 0)
+    index = tile * TILE + tl.arange(0, TILE).to(tl.int64)
+    count = _chunk_counts(Offsets, B, index, CHUNK)
+    start = carry + tl.cumsum(count, 0) - count
+    tl.store(Starts + index, start, index < B)
+    for k in range(0, tl.max(count, 0)):
+        tl.store(ChunkSegment + start + k, index.to(tl.int32), k < count)
+    if tile == tl.num_programs(0) - 1:
+        tl.store(Starts + B, carry + tl.sum(count, 0))
 
 
 @triton.jit
@@ -277,7 +294,10 @@ def _run(config, values, offsets, op, output):
     chunks = b + triton.cdiv(n, config.chunk)
     starts = torch.empty((b + 1,), dtype=torch.int64, device=values.device)
     table = torch.empty((chunks,), dtype=torch.int32, device=values.device)
-    _map_kernel[(1,)](offsets, starts, table, b, CHUNK=config.chunk, TILE=1024, num_warps=4)
+    tiles_of_segments = triton.cdiv(b, 1024)
+    tile_counts = torch.empty((tiles_of_segments,), dtype=torch.int64, device=values.device)
+    _count_kernel[(tiles_of_segments,)](offsets, tile_counts, b, CHUNK=config.chunk, TILE=1024, num_warps=4)
+    _map_kernel[(tiles_of_segments,)](offsets, tile_counts, starts, table, b, CHUNK=config.chunk, TILE=1024, num_warps=4)
     part_max = torch.empty((chunks, d), dtype=torch.float32, device=values.device)
     part_sum = torch.empty_like(part_max) if op == 2 else part_max
     _chunk_kernel[(chunks, tiles)](values, offsets, starts, table, output, part_max, part_sum, b,

@@ -33,8 +33,9 @@ for empty segments, outputs cast back to the input dtype, offsets assumed valid
   every kernel and the output cast.
 - `triton_reference.py`: Triton 3.8 kernels with two mappings. `segment` runs
   one program per (segment, feature tile) over all of its rows. `chunked` cuts
-  every segment into chunks of at most CHUNK rows, one program each: a
-  one-program map kernel builds the chunk-to-segment table on the device,
+  every segment into chunks of at most CHUNK rows, one program each: two small
+  kernels (per-tile chunk counts, then a scan and fill) build the
+  chunk-to-segment table on the device,
   chunks of multi-chunk segments write partial results, and a combine kernel
   merges them, so a long segment spreads over the GPU. Softmax keeps online
   statistics (running maximum, rescaled compensated exponential sum) and reads
