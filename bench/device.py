@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import re
 import shutil
 import subprocess
+import time
 
 
 def cuda_driver_info(ordinal: int) -> dict:
@@ -65,3 +67,57 @@ def cuda_driver_info(ordinal: int) -> dict:
     except (OSError, AttributeError) as exc:
         result["error"] = str(exc)
         return result
+
+
+GPU_STATE_FIELDS = ("index", "uuid", "name", "pstate", "clocks.sm", "clocks.mem", "clocks.max.sm",
+                    "clocks.max.mem", "temperature.gpu", "power.draw", "power.limit", "utilization.gpu",
+                    "utilization.memory", "memory.used", "clocks_event_reasons.active")
+
+
+def _query(command):
+    try:
+        probe = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, str(exc)
+    if probe.returncode:
+        return None, probe.stderr.strip() or f"exit {probe.returncode}"
+    return [[value.strip() for value in line.split(",")] for line in probe.stdout.strip().splitlines()], None
+
+
+def gpu_state() -> dict:
+    """Clocks, temperature, power, utilization and other compute processes, from nvidia-smi.
+
+    Clocks cannot be locked without administrator rights, so each run records
+    them instead. The host load average is included because host launch gaps
+    count in the complete-call times.
+    """
+    state = {"time_unix_ns": time.time_ns(), "host_loadavg": list(os.getloadavg())}
+    executable = shutil.which("nvidia-smi")
+    if not executable:
+        state["error"] = "nvidia-smi not found"
+        return state
+    rows, error = _query([executable, "--query-gpu=" + ",".join(GPU_STATE_FIELDS), "--format=csv,noheader,nounits"])
+    if error:
+        state["error"] = error
+    else:
+        state["gpus"] = [dict(zip(GPU_STATE_FIELDS, row)) for row in rows]
+    apps, error = _query([executable, "--query-compute-apps=pid,process_name,used_memory", "--format=csv,noheader,nounits"])
+    state["compute_processes"] = ([{"pid": row[0], "name": row[1], "used_memory_mib": row[2]} for row in apps if len(row) == 3]
+                                  if apps is not None else {"error": error})
+    return state
+
+
+def source_state(root) -> dict:
+    """The git commit of the checkout and any tracked files that differ from it."""
+    git = shutil.which("git")
+    if not git:
+        return {"git_commit": None, "error": "git not found"}
+    try:
+        head = subprocess.run([git, "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30)
+        status = subprocess.run([git, "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+                                capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"git_commit": None, "error": str(exc)}
+    if head.returncode:
+        return {"git_commit": None, "error": head.stderr.strip()}
+    return {"git_commit": head.stdout.strip(), "tracked_changes": status.stdout.splitlines()}

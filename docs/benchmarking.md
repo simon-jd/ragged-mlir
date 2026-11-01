@@ -1,11 +1,24 @@
 # Benchmarking
 
-`bench/run.py` measures one workload with every requested method;
-`bench/matrix.py` plans and runs many. The results in the README come from
-`results/bench/`: one directory per workload with its `results.json`, the
-ablations under `ablation/`, and `summary.json`, which lists each method's
-median CUDA-event time from those files in µs. Each `results.json` records the
-command that produced it.
+`bench/run.py` measures one workload with every requested method in one
+process. `bench/suite.py` runs the suite behind `results/bench/`: 19 workloads
+with every method, 6 with length hints and 43 ablations, each for 3 seeds of
+the length distribution and 5 repetitions, one process per run.
+`bench/summarize.py` turns the raw `results.json` files into `summary.json`.
+(`bench/matrix.py` plans and runs larger matrices with other options.)
+
+```sh
+python -m bench.suite --output build/runs --lock /var/tmp/gpu.lock    # about 1,020 processes
+python -m bench.summarize build/runs --output results/bench/summary.json
+```
+
+Each `results.json` records the command that produced it, the git commit of
+the checkout and any modified tracked files, and the GPU state from
+`nvidia-smi` (clocks, temperature, power, utilization, other compute
+processes) with the host load average, taken before the first method and
+after each one. Clocks are not locked. `summary.json` gives, for each method
+and L2 state, the median over runs of each run's median call time, the 25th
+and 75th percentiles of those run medians, and the number of runs.
 
 ```sh
 PYTHONPATH=python:. python -m bench.run \
@@ -30,7 +43,13 @@ the measurement), so a rerun writes a new directory rather than one under
 - **Two clocks.** CUDA events around the call on its stream (host launch gaps
   count, since the GPU waits for them) and host wall time until completion.
   After 5 warm-up calls, 30 calls are timed; the median, p90, minimum, maximum
-  and every sample are kept, with peak extra allocator memory.
+  and every sample are kept, with peak extra allocator memory. Every call
+  starts on an idle GPU.
+- **Warm and cold L2.** `--l2 warm` (the default) times back-to-back calls, so
+  inputs that fit the 72 MiB L2 stay there. `--l2 cold` overwrites a buffer of
+  four times the L2 size and synchronizes before every timed call; `--l2 both`
+  does both, recording the cold timings under `cold_l2`. The suite uses
+  `both`.
 - **Ragged extras.** Cold compile time, hot cache lookup, the compiler hash and
   cache key, and the `ExecutionReport` (classes, grids, kernels, host enqueue
   time) of the last call.

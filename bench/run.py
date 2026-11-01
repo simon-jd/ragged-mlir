@@ -22,10 +22,12 @@ import traceback
 import numpy as np
 
 from bench.distributions import DISTRIBUTIONS, describe, make_lengths, offsets_from_lengths
-from bench.device import cuda_driver_info
+from bench.device import cuda_driver_info, gpu_state, source_state
 from oracle import assert_matches, quantize_bf16
 
 
+ROOT = Path(__file__).resolve().parents[1]
+L2_MODES = ("warm", "cold", "both")
 METHODS = ("ragged-naive", "ragged-auto", "torch-segment", "njt-eager", "njt-compile", "cuda-naive", "cub", "triton", "fbgemm")
 
 
@@ -106,8 +108,10 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
             baseline_input(), offsets, "softmax", max_len=max_len)), metadata
 
     if method == "triton":
-        # An isolated cache makes first-call compilation evidence reviewable.
-        os.environ["TRITON_CACHE_DIR"] = str((destination / "triton-cache").resolve())
+        # An isolated cache (the default) makes the first call include compilation;
+        # a shared --triton-cache leaves only the tuning in it.
+        cache = getattr(args, "triton_cache", None)
+        os.environ["TRITON_CACHE_DIR"] = str(Path(cache).resolve() if cache else (destination / "triton-cache").resolve())
         from baselines import triton_reference
         metadata = triton_reference.toolchain().copy()
         start = time.perf_counter_ns()
@@ -203,7 +207,29 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
     return lambda: baseline_output(fn(baseline_input(), offsets, **bounds)), njt_provenance
 
 
-def measure(call, torch, *, method, warmup, repeats):
+def _timed(call, torch, method, repeats, flush):
+    device_ms, full_wall_ms = [], []
+    for _ in range(repeats):
+        if flush is not None:
+            # Overwrite more than the L2 cache, then start from an idle GPU.
+            flush.zero_()
+            torch.cuda.synchronize()
+        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        with torch.cuda.nvtx.range(f"ragged-benchmark/{method}/complete-call"):
+            started = time.perf_counter_ns()
+            start.record()
+            result = call()
+            end.record()
+            end.synchronize()
+            full_wall_ms.append((time.perf_counter_ns() - started) / 1e6)
+            device_ms.append(start.elapsed_time(end))
+            del result
+    return {"complete_call_cuda_event_ms": summarize(device_ms),
+            "complete_call_wall_until_complete_ms": summarize(full_wall_ms)}
+
+
+def measure(call, torch, *, method, warmup, repeats, l2="warm", flush=None):
+    """Warm timings in the top-level fields; with an L2 flush buffer, cold ones under cold_l2."""
     for _ in range(warmup):
         out = call()
         del out
@@ -217,20 +243,12 @@ def measure(call, torch, *, method, warmup, repeats):
     peak_reserved = torch.cuda.max_memory_reserved()
     peak = peak_allocated - baseline_allocated
     del memory_result
-    device_ms, full_wall_ms = [], []
-    for _ in range(repeats):
-        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        with torch.cuda.nvtx.range(f"ragged-benchmark/{method}/complete-call"):
-            started = time.perf_counter_ns()
-            start.record()
-            result = call()
-            end.record()
-            end.synchronize()
-            full_wall_ms.append((time.perf_counter_ns() - started) / 1e6)
-            device_ms.append(start.elapsed_time(end))
-            del result
-    return {"complete_call_cuda_event_ms": summarize(device_ms),
-            "complete_call_wall_until_complete_ms": summarize(full_wall_ms),
+    timings = _timed(call, torch, method, repeats, None) if l2 in ("warm", "both") else {}
+    if l2 in ("cold", "both"):
+        timings["cold_l2"] = {**_timed(call, torch, method, repeats, flush),
+                              "flush_bytes": flush.numel() * flush.element_size(),
+                              "scope": "every call starts after overwriting the flush buffer and synchronizing"}
+    return {**timings,
             "peak_additional_allocated_bytes": peak,
             "allocator_baseline_allocated_bytes": baseline_allocated,
             "allocator_peak_allocated_bytes": peak_allocated,
@@ -245,7 +263,8 @@ def measure(call, torch, *, method, warmup, repeats):
 def run(args) -> tuple[dict, int]:
     report = {"schema": 1, "status": "running", "timestamp_unix_ns": time.time_ns(),
               "command": list(os.sys.argv), "python": platform.python_version(), "methods": [],
-              "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+              "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "source": source_state(ROOT), "l2": getattr(args, "l2", "warm")}
     try:
         torch = importlib.import_module("torch")
         report["torch"] = torch.__version__
@@ -288,7 +307,13 @@ def run(args) -> tuple[dict, int]:
     tensor = torch.from_numpy(values).to("cuda", dtype=torch.float32 if args.dtype == "f32" else torch.bfloat16)
     bounds = torch.from_numpy(offsets).to("cuda")
     mask_tensor = torch.from_numpy(mask).to("cuda") if mask is not None else None
+    l2 = getattr(args, "l2", "warm")
+    flush = None
+    if l2 != "warm":
+        l2_bytes = report["cuda_driver"].get("l2_cache_size_bytes") or 72 << 20
+        flush = torch.empty((4 * l2_bytes,), dtype=torch.uint8, device="cuda")
     torch.cuda.synchronize()
+    report["gpu_state"] = {"before": gpu_state()}
     for method in args.methods:
         cell = {"method": method}
         try:
@@ -300,7 +325,8 @@ def run(args) -> tuple[dict, int]:
             actual = result.float().cpu().numpy()
             cell["oracle"] = assert_matches(actual, oracle_values, offsets, operation=args.op, input_dtype=args.dtype)
             del result, actual
-            cell.update(measure(call, torch, method=method, warmup=args.warmup, repeats=args.repeats))
+            cell.update(measure(call, torch, method=method, warmup=args.warmup, repeats=args.repeats,
+                                l2=l2, flush=flush))
             execution_report = details.pop("_last_execution_report_object", None)
             if execution_report is not None:
                 details["last_execution_report"] = execution_report.to_dict()
@@ -314,6 +340,7 @@ def run(args) -> tuple[dict, int]:
             cell.update(status="failed", error=f"{type(exc).__name__}: {exc}")
             (args.output / f"{method}.stderr.txt").write_text(traceback.format_exc())
         report["methods"].append(cell)
+        report["gpu_state"]["after"] = gpu_state()
         # Persist each completed cell before another method can fail or crash.
         (args.output / "results.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
     failed = any(cell["status"] == "failed" for cell in report["methods"])
@@ -350,6 +377,9 @@ def main():
                         help="supply the workload's exact min/max segment lengths to ragged (NJT always gets them)")
     parser.add_argument("--serial-classes", action="store_true",
                         help="launch ragged's segment-class workers one after another on the caller's stream")
+    parser.add_argument("--l2", choices=L2_MODES, default="warm",
+                        help="time with a warm L2, after flushing it before every call (cold), or both")
+    parser.add_argument("--triton-cache", type=Path, help="shared Triton kernel cache (default: one per run)")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--output", type=Path, required=True)
