@@ -42,6 +42,7 @@ def draw(summary, output):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import matplotlib.ticker
     rows = speedups(summary)
     figure, axis = plt.subplots(figsize=(8, 0.42 * len(rows) + 1.2))
     height = 0.38
@@ -56,9 +57,12 @@ def draw(summary, output):
             axis.text(value * 1.04, index + offset, f"{value:.2f}× vs {LABELS[method]}", va="center", fontsize=7)
     axis.axvline(1.0, color="black", linewidth=0.8)
     axis.set_xscale("log")
+    ticks = [0.25, 0.5, 1, 2]
+    axis.set_xticks(ticks, [f"{tick:g}×" for tick in ticks])
+    axis.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
     axis.set_yticks(range(len(rows)), [label for label, _ in rows], fontsize=8)
     axis.invert_yaxis()
-    axis.set_xlabel("speedup of ragged over the fastest comparison method (log scale; <1: ragged is slower)")
+    axis.set_xlabel("ragged's speedup over the fastest comparison (log scale; below 1×, ragged is slower)", fontsize=9)
     axis.legend(loc="lower right", fontsize=8)
     axis.set_xlim(right=axis.get_xlim()[1] * 2.2)
     figure.tight_layout()
