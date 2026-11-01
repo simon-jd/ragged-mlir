@@ -1,4 +1,5 @@
 """Checked ABI and host orchestration tests, never numeric GPU simulation."""
+import gc
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
@@ -114,6 +115,9 @@ def host_cuda(monkeypatch):
     program = checked_program()
     monkeypatch.setattr(runtime, "_torch", lambda: fake_torch)
     module = PlanModule(launch)
+    # Programs of earlier tests that are still in reference cycles release
+    # their module key when collected; collect them before installing ours.
+    gc.collect()
     monkeypatch.setattr(runtime, "_resident_modules", {(0, program.artifact.key.digest): module})
     monkeypatch.setattr(runtime, "_workers", {})
     monkeypatch.setattr(runtime, "_plans", {})
