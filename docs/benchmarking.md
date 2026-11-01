@@ -53,8 +53,9 @@ the measurement), so a rerun writes a new directory rather than one under
 - **Ragged extras.** Cold compile time, hot cache lookup, the compiler hash and
   cache key, and the `ExecutionReport` (classes, grids, kernels, host enqueue
   time) of the last call.
-- **Inputs.** Each run saves its input arrays, their hashes, the seed and the
-  segment-length histogram.
+- **Inputs.** Each run saves its input arrays (`case.npz`, which the suite
+  deletes after each run), their hashes, the seed and the segment-length
+  histogram.
 
 ## Methods
 

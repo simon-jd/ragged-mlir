@@ -6,10 +6,11 @@ launched, and how softmax keeps its statistics. This document records, for
 each, what else could have been done and what the choice gives up, with the
 measurements behind it.
 
-Numbers are complete-call microseconds on an RTX 4090 from `results/bench/`
-(`summary.json`, the ablations, `profile.txt` and `host.txt`). A few
-comparisons come from separate A/B runs whose records are not in `results/`;
-those are marked "A/B". "D" is the feature dimension, "long tail" the
+Numbers are complete-call microseconds on an RTX 4090 from `results/bench/`:
+medians over 15 runs with a warm L2 from `summary.json` unless a sentence
+says otherwise, plus `profile.txt` and `host.txt`. A few comparisons come
+from separate A/B runs whose records are not in `results/`; those are marked
+"A/B". "D" is the feature dimension, "long tail" the
 Pareto-distributed segment lengths of the benchmark, and `ragged-naive` the
 compiler's own one-block-per-segment mode.
 
@@ -45,22 +46,24 @@ on the device; length hints prune classes at compile time.
 **Alternatives.** One block per segment (the `naive` strategy, kept as
 `ragged-naive`); sorting segments by length; binning on the host.
 
-**Why.** One block per segment puts a long segment on one SM. On the long-tail
-inputs `ragged-naive` takes 83 µs for the D=1 sum, 266 µs for the D=1
-softmax and 604 µs for the D=128 softmax, against 45, 83 and 438 µs with
-classification. Sorting costs a full sort per call. Host binning needs the
+**Why.** One block per segment puts a long segment on one SM. With the
+300,412-row segment of seed 711, `ragged-naive` takes 85 µs for the D=1 sum
+and 263 µs for the D=1 softmax, against 53 and 83 µs with classification; the
+D=128 long-tail softmax takes 575 µs naive and 437 µs classified. Sorting costs a full sort per call. Host binning needs the
 offsets on the host, which means a device-to-host copy and a synchronization
 in the middle of the call.
 
 **Cost.** Two prologue kernels (init and classify), three class chains and a
 stream fork and join on every call. That cost is not always repaid:
-`ragged-naive` is faster in 8 of the 19 benchmark cases, every uniform and
-bursty case at D=1 (the uniform D=1 sum takes 33 µs naive, 48 µs classified
-and 15 µs in `torch.segment_reduce`) and the bursty D=128 sum and max.
-Nothing chooses between the two automatically; exact length hints that leave one class compile the block-per-segment kernel, which
-is slower than classification for the uniform D=128 sum (166 against 138 µs).
-The thresholds are fixed, not tuned per GPU or per D. A segmented reduction
-specialized for D=1 (CUB) is faster on the bursty input (25 µs against 39).
+`ragged-naive` is faster in 11 of the 19 workloads: every D=1 workload (the
+uniform D=1 sum takes 34 µs naive, 49 µs classified and 15 µs in
+`torch.segment_reduce`), helped by the long-tail seeds whose longest segment
+is about 30,000 rows, and the bursty D=128 sum and max. Nothing chooses
+between the two automatically; exact length hints that leave one class
+compile the block-per-segment kernel, which is slower than classification for
+the uniform D=128 sum (168 against 135 µs). The thresholds are fixed, not
+tuned per GPU or per D. A segmented reduction specialized for D=1 (CUB) is
+faster on the bursty input (26 µs against 39).
 
 ## Persistent workers with a static stride
 
@@ -103,13 +106,15 @@ CTA workers slower: the uniform D=128 sum with the classes run serially took
 runs. Over the 18-case matrix, warp aggregation (with the submission order
 below) was 8% faster than per-segment atomics in geometric mean and block
 aggregation 4.5% (A/B). In the committed kernel trace the warp-aggregated
-classify takes 6.8 µs on the D=1 long-tail sum.
+classify takes 6.7 µs on the D=1 long-tail sum.
 
 **Cost.** In the A/B runs the long-tail sum and max at D=128 were 5 to 6%
 slower than with per-segment atomics, in every aggregated variant: with the
-classes serial, the CTA sum worker took 155 µs instead of 129 (155 µs in the
-committed trace too). It comes from the queue order, not the submission
-order.
+classes serial, the CTA sum worker took 155 µs instead of 129. It came from
+the queue order, not the submission order. The trace of the current build
+(`profile.txt`) has that worker at 129 µs with warp-ordered queues, so the
+cost may no longer apply; it has not been measured again against
+per-segment atomics.
 
 ## Running the classes concurrently, CTA chain first
 
@@ -122,8 +127,8 @@ disjoint segments, so no other ordering is needed.
 (kept as `run(concurrent=False)`); submit the longest-running chain first.
 
 **Why.** The chains of a long-tail input overlap: the D=128 long-tail sum
-takes 194 µs concurrent and 215 µs serial, and concurrent classes are faster
-in all 18 f32 cases of the ablation. The submission order was measured, not
+takes 194 µs concurrent and 211 µs serial, and concurrent classes are faster
+in all 18 f32 workloads of the ablation. The submission order was measured, not
 reasoned out: with the split chain first, the uniform D=128 sum took 176 µs,
 and with the CTA chain first 133 µs (A/B, medians of two matrix runs). In a
 separate measurement, `CUDA_DEVICE_MAX_CONNECTIONS=1`, which serializes
@@ -147,12 +152,13 @@ workspace is one 256-byte-aligned allocation.
 shape.
 
 **Why.** Against an earlier runtime that launched each kernel from Python
-(`host.txt`), host time per call dropped from 64 to 23 µs for a D=1 sum, and
-from 99 to 30 µs for a D=128 softmax that then had 13 kernels. Because the
-benchmark's CUDA events count the gaps in which the GPU waits for the host,
-that is visible in end-to-end times too. A graph would need its kernel
-parameters updated for every call's tensors; it was not tried, because the
-launch plan already brought host time to about 23 µs.
+(A/B), host time per call dropped from 64 to 23 µs for a D=1 sum, and from 99
+to 30 µs for a D=128 softmax that then had 13 kernels; the current build
+takes 24 and 28 µs (`host.txt`). Because the benchmark's CUDA events count the
+gaps in which the GPU waits for the host, that is visible in end-to-end
+times too. A graph would need its kernel parameters updated for every call's
+tensors; it was not tried, because the launch plan already brought host time
+to about 25 µs.
 
 **Cost.** Plans are cached per shape (cleared at 256), and the native code
 has to join every stream it forked even when a launch fails in the middle,
@@ -172,9 +178,9 @@ kernel; the textbook online softmax that rescales at every new maximum.
 
 **Why.** It reads the rows twice instead of three times and launches one
 kernel instead of three: with three passes in every class the D=128
-long-tail softmax takes 651 µs and the uniform one 634 µs, with online
-statistics 438 and 313 µs, and the uniform case's CTA kernel moves its data at
-0.95 TB/s against the 4090's 1.01 TB/s DRAM bandwidth. Rescaling at
+long-tail softmax takes 653 µs and the uniform one 636 µs, with online
+statistics 437 and 312 µs, and the uniform case's CTA kernel moves its data at
+0.94 TB/s against the 4090's 1.01 TB/s DRAM bandwidth (warm L2). Rescaling at
 every new maximum multiplies the sum by many factors close to one and loses
 accuracy on slowly increasing inputs; a lagging reference does not, and GPU
 tests with such ramps hold it to the fixed tolerance. With compensated lanes the error does not grow with segment length, so
@@ -198,13 +204,13 @@ their combine, partial exponential sums against the combined maximum, their
 combine, normalization); one cooperative kernel with a grid-wide barrier.
 
 **Why.** Three kernels and two reads instead of five and three: the bursty
-D=128 softmax, almost all split segments, takes 666 µs with three passes in
-every class and 506 µs with online statistics (Triton 646). A grid-wide
+D=128 softmax, almost all split segments, takes 665 µs with three passes in
+every class and 509 µs with online statistics (tuned Triton 480). A grid-wide
 barrier would need a cooperative launch with every block
 resident, which cannot share the GPU with the other classes' workers.
 
 **Cost.** On the long tail the per-part kernel is bound by the latency of the
-fold: with the classes serial it takes 61 µs. Run concurrently, it runs
+fold: with the classes serial it takes 62 µs. Run concurrently, it runs
 beside the CTA chain, which takes longer (`profile.txt`), so the call does not
 wait on it.
 
@@ -218,7 +224,7 @@ the bounds guard is compiled out, so the loads carry no branch.
 accumulators combined at the end.
 
 **Why.** Eight loads in flight per lane instead of one: the D=128 long-tail
-sum takes 194 µs against 215 µs without, the softmax 438 against 600.
+sum takes 194 µs against 216 µs without, the softmax 437 against 602.
 Folding in row order keeps every floating-point operation in the rolled
 loop's order, so results are bitwise identical with the control on or off,
 which a GPU test checks. Independent accumulators would shorten the
@@ -226,9 +232,8 @@ dependency chain further but change results with the unroll factor.
 
 **Cost.** The online fold's chain is not shortened. Recentering once per
 batch of eight rows would shorten it, at the price of the bitwise guarantee.
-Pipelining is not faster everywhere: in six of the 18 f32 cases it is slower,
-by up to 6% (uniform D=128 max, 139 against 131 µs), all with uniform lengths
-except the bursty D=128 softmax (3%).
+Pipelining is not faster everywhere: in seven of the 18 f32 workloads it is
+slower, by 0.4 to 3.6% (uniform D=1 softmax, 55 against 53 µs).
 
 ## Compensated f32 instead of f64
 
