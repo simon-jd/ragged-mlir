@@ -2,14 +2,20 @@
 
 `bench/run.py` measures one workload with every requested method in one
 process. `bench/suite.py` runs the suite behind `results/bench/`: 19 workloads
-with every method, 6 with length hints and 43 ablations, each for 3 seeds of
+with every method, 6 with length hints and 52 ablations, each for 3 seeds of
 the length distribution and 5 repetitions, one process per run.
-`bench/summarize.py` turns the raw `results.json` files into `summary.json`.
+`bench/summarize.py` turns the raw `results.json` files into `summary.json`,
+and `bench/calibrate.py` fits the cost model that chooses ragged's schedule
+per call and evaluates it on held-out seeds.
 (`bench/matrix.py` plans and runs larger matrices with other options.)
 
 ```sh
-python -m bench.suite --output build/runs --lock /var/tmp/gpu.lock    # about 1,020 processes
+python -m bench.suite --groups main --seeds 711 712 --methods ragged-classified ragged-naive \
+    --output build/calibration --lock /var/tmp/gpu.lock                # 190 processes
+python -m bench.calibrate fit build/calibration --train 711 712 --output python/ragged/cost_model.json
+python -m bench.suite --output build/runs --lock /var/tmp/gpu.lock    # about 1,155 processes
 python -m bench.summarize build/runs --output results/bench/summary.json
+python -m bench.calibrate evaluate build/runs --seeds 713
 ```
 
 Each `results.json` records the command that produced it, the git commit of
@@ -61,7 +67,8 @@ the measurement), so a rerun writes a new directory rather than one under
 
 | Method | What it is |
 |---|---|
-| `ragged-auto` | this compiler with device classification |
+| `ragged-auto` | this compiler's adaptive program: per call, the cost model (`python/ragged/selection.py`) chooses device classification or one block per segment from N, B, D and the longest segment length, which the benchmark passes as `max_len` (the bound NJT also receives) |
+| `ragged-classified` | the same program with device classification forced (`select="classified"`); what `ragged-auto` runs without `max_len` |
 | `ragged-naive` | this compiler, one block per segment |
 | `torch-segment` | `torch.segment_reduce` (sum and max) with f32 accumulation |
 | `njt-eager`, `njt-compile` | `torch.nested` jagged tensors, eager and `torch.compile(fullgraph=True)`; max pads explicitly with `-inf` because NJT's own padding breaks empty and all-`-inf` segments |
@@ -80,10 +87,14 @@ Unsupported combinations (CUB at D>1, softmax in `torch.segment_reduce`) are
   always gets them, as `min_seqlen`/`max_seqlen`. Hinted and unhinted runs are
   recorded separately.
 - `--disable-optimization NAME` (classification, online_fusion, warp_mapping,
-  split_mapping, shuffle, pointwise_fusion, row_pipelining) and `--feature-tile`
-  for ablations.
+  split_mapping, shuffle, pointwise_fusion, row_pipelining, vectorize) and
+  `--feature-tile` for ablations. The suite's ablations time
+  `ragged-classified`, the schedule that serial classes, row pipelining and
+  online statistics change, and both schedules without vector access at D=128.
 - `--serial-classes` launches ragged's segment-class worker chains one after
   another on the caller's stream instead of concurrently.
+- `--no-max-len` withholds the longest segment length from `ragged-auto`,
+  which then keeps device classification.
 - `--mask` and `--scale` add the softmax mask and scale to every method.
 - `--fixed-segments` keeps the segment count and lets the element count vary;
   by default the element count is fixed.
@@ -95,3 +106,4 @@ Systems and reports each ragged kernel's mean time and the GPU span of a call
 kernel time when the class chains overlap; its docstring has the commands.
 `python -m bench.profile host` times the host side of a call alone, starting
 every call on an idle GPU so that a full launch queue cannot stall the host.
+`bench.profile run` takes `--strategy classified|naive` and `--l2 cold`.

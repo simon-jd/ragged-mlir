@@ -12,12 +12,13 @@ from bench.summarize import summarize
 
 def test_suite_covers_every_case_with_each_comparison():
     configurations = cases()
-    assert len({(group, name) for group, name, _ in configurations}) == len(configurations) == 68
+    assert len({(group, name) for group, name, _ in configurations}) == len(configurations) == 77
     main = [flags for group, _, flags in configurations if group == "main"]
     assert len(main) == 19
     assert all(flags[flags.index("--methods") + 1:] == list(ALL_METHODS) for flags in main)
     groups = {group for group, _, _ in configurations}
-    assert groups == {"main", "hints", "ablation/serial-classes", "ablation/no-row-pipelining", "ablation/three-pass"}
+    assert groups == {"main", "hints", "ablation/serial-classes", "ablation/no-row-pipelining", "ablation/three-pass",
+                      "ablation/no-vectorize"}
 
 
 class FakeTorch:

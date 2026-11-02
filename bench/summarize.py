@@ -90,6 +90,11 @@ def summarize(root: Path) -> dict:
                 report = measured[-1].get("last_execution_report") or {}
                 entry["classes"] = report.get("classes")
                 entry["streams"] = report.get("streams")
+                # The schedule the adaptive program chose, per seed.
+                chosen = defaultdict(lambda: defaultdict(int))
+                for cell in measured:
+                    chosen[cell["_seed"]][(cell.get("last_execution_report") or {}).get("selected")] += 1
+                record["selected_by_seed"] = {seed: dict(counts) for seed, counts in sorted(chosen.items())}
             if method == "triton" and measured:
                 record["tuned_configs"] = sorted({json.dumps((cell.get("tuning") or {}).get("config"), sort_keys=True)
                                                   for cell in measured})
