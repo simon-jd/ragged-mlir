@@ -17,6 +17,7 @@ from typing import Any
 from .cache import Artifact, ArtifactCache, CacheKey, _unique_object
 from .errors import CacheMismatch, CacheMiss, CompilationError, ToolchainUnavailable
 from .model import DIALECT_VERSION, ProgramSpec, canonical_json
+from .validation import validate_manifest
 
 
 @dataclass(frozen=True)
@@ -173,7 +174,7 @@ class Compiler:
                 metadata: dict[str, Any] = json.loads(sidecar.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
             except (OSError, ValueError) as exc:
                 raise CompilationError(f"invalid compiler ABI manifest: {exc}") from exc
-            CompiledProgram.validate_metadata(metadata)
+            validate_manifest(metadata)
             if "resources" not in metadata:
                 raise CompilationError("compiler emitted no measured ptxas resources; artifact will not be published")
             if canonical_json(metadata.get("toolchain")) != canonical_json(actual):

@@ -9,6 +9,7 @@ from ragged import Artifact, ArtifactCache, CacheKey, CompiledProgram, Compilati
 from ragged.cli import main
 from ragged.errors import CacheMismatch
 from ragged.resources import RESOURCE_FIELDS
+from ragged.validation import validate_manifest
 from test_frontend import compiler_transport
 from test_runtime_checked import checked_program, host_cuda
 from test_runtime_mask import install
@@ -80,7 +81,7 @@ def test_measurements_are_strict_nonnegative_i64(field, value):
     metadata = deepcopy(with_resources().artifact.metadata)
     metadata["resources"]["kernels"][0][field] = value
     with pytest.raises(CacheMismatch):
-        CompiledProgram.validate_metadata(metadata)
+        validate_manifest(metadata)
 
 
 @pytest.mark.parametrize("mutation", ["absent_entry", "extra_entry", "duplicate_entry", "reorder", "missing_validation",
@@ -117,7 +118,7 @@ def test_incomplete_inconsistent_or_excess_resource_evidence_is_rejected(mutatio
     elif mutation == "budget_zero": resources["requested"]["regs_budget"] = 0
     else: resources["requested"]["registers"] = 65536
     with pytest.raises(CacheMismatch):
-        CompiledProgram.validate_metadata(metadata)
+        validate_manifest(metadata)
 
 
 def test_exact_budget_boundary_accepts_but_source_mismatch_rejects():

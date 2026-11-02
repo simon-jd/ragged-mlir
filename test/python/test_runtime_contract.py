@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from ragged.errors import CacheMismatch, RuntimeUnavailable, ValidationError
-from ragged.runtime import CompiledProgram, memref_arguments
+from ragged.runtime import memref_arguments
+from ragged.validation import validate_manifest
 
 
 def manifest():
@@ -33,7 +34,7 @@ def test_descriptor_rejects_out_of_range_signed_index(shape, stride):
 
 
 def test_supported_manifest_validates():
-    CompiledProgram.validate_metadata(manifest())
+    validate_manifest(manifest())
 
 
 @pytest.mark.parametrize("field,value", [
@@ -46,7 +47,7 @@ def test_manifest_scalar_types_are_strict(field, value):
     data = manifest()
     data[field] = value
     with pytest.raises((CacheMismatch, RuntimeUnavailable)):
-        CompiledProgram.validate_metadata(data)
+        validate_manifest(data)
 
 
 @pytest.mark.parametrize("field,value", [
@@ -60,4 +61,4 @@ def test_malformed_kernel_abi_is_rejected(field, value):
     data = manifest()
     data["kernels"][0][field] = value
     with pytest.raises(CacheMismatch):
-        CompiledProgram.validate_metadata(data)
+        validate_manifest(data)
