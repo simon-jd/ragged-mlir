@@ -13,7 +13,7 @@ per call and evaluates it on held-out seeds.
 python -m bench.suite --groups main --seeds 711 712 --methods ragged-classified ragged-naive \
     --output build/calibration --lock /var/tmp/gpu.lock                # 190 processes
 python -m bench.calibrate fit build/calibration --train 711 712 --output python/ragged/cost_model.json
-python -m bench.suite --output build/runs --lock /var/tmp/gpu.lock    # about 1,155 processes
+python -m bench.suite --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600   # 1,155 processes
 python -m bench.summarize build/runs --output results/bench/summary.json
 python -m bench.calibrate evaluate build/runs --seeds 713
 ```
@@ -53,7 +53,8 @@ the measurement), so a rerun writes a new directory rather than one under
   starts on an idle GPU.
 - **Warm and cold L2.** `--l2 warm` (the default) times back-to-back calls, so
   inputs that fit the 72 MiB L2 stay there. `--l2 cold` overwrites a buffer of
-  four times the L2 size and synchronizes before every timed call; `--l2 both`
+  four times the L2 size and synchronizes before every timed call (the
+  overwritten lines are dirty, so the call also pays for writing them back); `--l2 both`
   does both, recording the cold timings under `cold_l2`. The suite uses
   `both`.
 - **Ragged extras.** Cold compile time, hot cache lookup, the compiler hash and
@@ -107,3 +108,8 @@ kernel time when the class chains overlap; its docstring has the commands.
 `python -m bench.profile host` times the host side of a call alone, starting
 every call on an idle GPU so that a full launch queue cannot stall the host.
 `bench.profile run` takes `--strategy classified|naive` and `--l2 cold`.
+`python -m bench.profile flush` times a call with a warm L2, after the
+benchmark's flush and after a flush that only reads the buffer: the
+benchmark's `zero_()` leaves the L2 full of dirty lines, whose write-back to
+DRAM happens during the next call's reads and is part of every method's
+cold-L2 time.

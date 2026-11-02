@@ -145,6 +145,15 @@ launches the chains one after another on the caller's stream, in manifest
 order. `ExecutionReport.kernel_names` and `grids` list kernels in submission
 order, and `streams` counts the streams the call used.
 
+A classified program compiled by `Compiler.compile` (unless `adaptive=False`)
+also holds its block-per-segment specialization as `program.naive`, a separate
+artifact with the direct ABI of [abi.md](abi.md). `run(..., max_len=L)` lets
+the cost model in `ragged/selection.py` choose between the two for that call;
+`select="classified"` or `select="naive"` forces one, and without `max_len`
+the classified launch sequence above runs. `ExecutionReport.selected` names
+the schedule that ran and `selection` holds the statistics and predicted
+times behind the choice. Debug-visit specializations have no companion.
+
 Warp workers use 32 threads and f32 `gpu.shuffle` reductions; disabling shuffle
 selects a shared-memory reduction tree with uniform barriers. CTA and split
 workers use 128 threads and uniform shared-memory reduction barriers. The
