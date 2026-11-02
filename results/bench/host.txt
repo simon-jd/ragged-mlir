@@ -1,10 +1,15 @@
-Host time per call, each call started on an idle GPU (python -m bench.profile host CASE/case.npz --op OP;
-median of 1,000 calls after 100 warm-up; three alternating runs), RTX 4090, us, at commit 8ed1380cfef61320b7b818df571bdfb823912b46.
-The host was running other work at the same time (the benchmark runs recorded 1-minute load averages
-of 4.6 to 13), so these numbers move by a few microseconds between runs.
+Host time per call, each call started on an idle GPU (python -m bench.profile host CASE/case.npz --op OP
+--strategy classified|naive; median of 1,000 calls after 100 warm-up; three runs), RTX 4090, us, seed 711 inputs,
+at commit f0bd6903feb5b75c52cd1857e666887a14ee9db7. Block per segment launches one kernel and forks no streams, so its
+two rows are the same schedule. The host ran other work at the same time, so these move by a few
+microseconds between runs.
 
-case                         classes      median   runs
-sum-f32-d1-uniform           concurrent    24.3   24.3 25.2 24.2
-sum-f32-d1-uniform           serial        22.7   27.7 22.7 22.1
-softmax-f32-d128-long_tail   concurrent    27.8   25.9 27.8 29.9
-softmax-f32-d128-long_tail   serial        24.4   24.3 24.4 27.6
+case                         schedule    classes      median   runs
+sum-f32-d1-uniform           classified  concurrent     24.0   24.6 23.4 24.0
+sum-f32-d1-uniform           classified  serial         22.4   22.9 22.0 22.4
+sum-f32-d1-uniform           naive       concurrent     14.3   14.3 15.5 14.2
+sum-f32-d1-uniform           naive       serial         14.4   14.2 15.0 14.4
+softmax-f32-d128-long_tail   classified  concurrent     26.1   26.3 26.1 25.6
+softmax-f32-d128-long_tail   classified  serial         24.4   24.4 25.1 24.3
+softmax-f32-d128-long_tail   naive       concurrent     15.3   15.3 14.9 16.8
+softmax-f32-d128-long_tail   naive       serial         15.3   15.3 14.7 15.4

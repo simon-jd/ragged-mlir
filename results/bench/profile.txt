@@ -1,120 +1,236 @@
-Kernel time and GPU span per call (nsys 2025.6, 20 calls after 5 warm-up, RTX 4090, warm L2) on the
-benchmark inputs of seed 711, measured at commit 8ed1380cfef61320b7b818df571bdfb823912b46:
-  python -m bench.run ... --seed 711 --methods ragged-auto --output CASE     (saves CASE/case.npz)
-  nsys profile --capture-range=cudaProfilerApi -o OUT python -m bench.profile run CASE/case.npz --op OP [--serial-classes]
+Kernel time and GPU span per call (nsys 2025.6, 20 calls after 5 warm-up, each call started on an idle GPU,
+RTX 4090) on the benchmark inputs of seed 711, both schedules of the adaptive program, warm and cold L2
+(cold: a buffer of four times the L2 is overwritten before every call), measured at commit f0bd6903feb5b75c52cd1857e666887a14ee9db7:
+  python -m bench.run ... --seed 711 --methods ragged-naive --output CASE     (saves CASE/case.npz)
+  nsys profile --capture-range=cudaProfilerApi -o OUT python -m bench.profile run CASE/case.npz --op OP \
+      --strategy classified|naive [--l2 cold] [--serial-classes]
   nsys stats --report cuda_gpu_trace --format csv -o OUT OUT.nsys-rep; python -m bench.profile summarize OUT_cuda_gpu_trace.csv
 With concurrent classes, kernels share the GPU, so each kernel's duration grows while the span shrinks.
+The classified schedule launches every class's chain even when its queue is empty.
+GPU state at the start and end of the traces:
+  2026/11/01 22:21:44.773, 2520 MHz, 10501 MHz, 38, 55.13 W, 0 %
+  2026/11/01 22:25:55.198, 2805 MHz, 10501 MHz, 39, 131.29 W, 87 %
 
-== sum-f32-d128-long_tail, classes concurrent
-20 calls: median kernel time 307.8 us, median GPU span 177.5 us
-   49.2%  avg   152.2 us  x  20  ragged_0_cta_sum
-   26.8%  avg    82.8 us  x  20  ragged_0_split_partial_sum
-   21.6%  avg    66.8 us  x  20  ragged_0_warp_sum
-    1.3%  avg     3.9 us  x  20  ragged_0_classify
-    0.8%  avg     2.4 us  x  20  ragged_0_split_combine_sum
-    0.5%  avg     1.4 us  x  20  ragged_0_init
-
-== sum-f32-d128-long_tail, classes serial
-20 calls: median kernel time 190.0 us, median GPU span 193.4 us
-   67.1%  avg   128.6 us  x  20  ragged_0_cta_sum
-   17.4%  avg    33.3 us  x  20  ragged_0_warp_sum
-   11.6%  avg    22.3 us  x  20  ragged_0_split_partial_sum
-    2.4%  avg     4.6 us  x  20  ragged_0_classify
-    1.0%  avg     2.0 us  x  20  ragged_0_split_combine_sum
+== sum-f32-d1-uniform, classified, warm L2
+20 calls: median kernel time 34.5 us, median GPU span 30.4 us
+   54.3%  avg    18.7 us  x  20  ragged_0_cta_sum
+   18.9%  avg     6.5 us  x  20  ragged_0_classify
+    8.1%  avg     2.8 us  x  20  ragged_0_split_partial_sum
+    8.0%  avg     2.8 us  x  20  ragged_0_split_combine_sum
+    8.0%  avg     2.7 us  x  20  ragged_0_warp_sum
+    2.7%  avg     0.9 us  x  20  ragged_0_init
+== sum-f32-d1-uniform, classified, cold L2
+20 calls: median kernel time 38.0 us, median GPU span 33.4 us
+   50.4%  avg    19.0 us  x  20  ragged_0_cta_sum
+   25.2%  avg     9.5 us  x  20  ragged_0_classify
+    7.9%  avg     3.0 us  x  20  ragged_0_split_partial_sum
+    7.9%  avg     3.0 us  x  20  ragged_0_warp_sum
+    5.4%  avg     2.0 us  x  20  ragged_0_split_combine_sum
+    3.2%  avg     1.2 us  x  20  ragged_0_init
+== sum-f32-d1-uniform, naive, warm L2
+20 calls: median kernel time 14.8 us, median GPU span 14.8 us
+  100.0%  avg    14.8 us  x  20  ragged_0_sum
+== sum-f32-d1-uniform, naive, cold L2
+20 calls: median kernel time 17.7 us, median GPU span 17.7 us
+  100.0%  avg    17.8 us  x  20  ragged_0_sum
+== sum-f32-d1-long_tail, classified, warm L2
+20 calls: median kernel time 31.2 us, median GPU span 30.1 us
+   30.8%  avg     9.6 us  x  20  ragged_0_split_partial_sum
+   21.0%  avg     6.6 us  x  20  ragged_0_classify
+   19.4%  avg     6.1 us  x  20  ragged_0_cta_sum
+   17.5%  avg     5.5 us  x  20  ragged_0_warp_sum
+    8.2%  avg     2.6 us  x  20  ragged_0_split_combine_sum
+    3.0%  avg     0.9 us  x  20  ragged_0_init
+== sum-f32-d1-long_tail, classified, cold L2
+20 calls: median kernel time 53.0 us, median GPU span 42.4 us
+   40.9%  avg    21.8 us  x  20  ragged_0_split_partial_sum
+   19.3%  avg    10.3 us  x  20  ragged_0_cta_sum
+   18.3%  avg     9.8 us  x  20  ragged_0_classify
+   15.5%  avg     8.3 us  x  20  ragged_0_warp_sum
+    3.7%  avg     2.0 us  x  20  ragged_0_split_combine_sum
+    2.3%  avg     1.2 us  x  20  ragged_0_init
+== sum-f32-d1-long_tail, naive, warm L2
+20 calls: median kernel time 65.4 us, median GPU span 65.4 us
+  100.0%  avg    65.2 us  x  20  ragged_0_sum
+== sum-f32-d1-long_tail, naive, cold L2
+20 calls: median kernel time 114.9 us, median GPU span 114.9 us
+  100.0%  avg   115.3 us  x  20  ragged_0_sum
+== softmax-f32-d1-uniform, classified, warm L2
+20 calls: median kernel time 38.0 us, median GPU span 34.6 us
+   56.5%  avg    21.6 us  x  20  ragged_0_cta_online
+   17.6%  avg     6.7 us  x  20  ragged_0_classify
+    8.1%  avg     3.1 us  x  20  ragged_0_warp_online
+    6.2%  avg     2.4 us  x  20  ragged_0_split_partial_online
+    4.6%  avg     1.8 us  x  20  ragged_0_split_normalize
+    4.5%  avg     1.7 us  x  20  ragged_0_split_combine_online
+    2.5%  avg     0.9 us  x  20  ragged_0_init
+== softmax-f32-d1-uniform, classified, cold L2
+20 calls: median kernel time 47.6 us, median GPU span 44.5 us
+   51.7%  avg    24.6 us  x  20  ragged_0_cta_online
+   25.5%  avg    12.1 us  x  20  ragged_0_classify
+    7.0%  avg     3.3 us  x  20  ragged_0_split_partial_online
+    5.9%  avg     2.8 us  x  20  ragged_0_warp_online
+    3.9%  avg     1.9 us  x  20  ragged_0_split_combine_online
+    3.7%  avg     1.8 us  x  20  ragged_0_split_normalize
+    2.3%  avg     1.1 us  x  20  ragged_0_init
+== softmax-f32-d1-uniform, naive, warm L2
+20 calls: median kernel time 17.7 us, median GPU span 17.7 us
+  100.0%  avg    17.7 us  x  20  ragged_0_online
+== softmax-f32-d1-uniform, naive, cold L2
+20 calls: median kernel time 22.5 us, median GPU span 22.5 us
+  100.0%  avg    22.6 us  x  20  ragged_0_online
+== sum-f32-d128-uniform, classified, warm L2
+20 calls: median kernel time 151.2 us, median GPU span 107.6 us
+   65.3%  avg   100.7 us  x  20  ragged_0_cta_sum
+   16.4%  avg    25.3 us  x  20  ragged_0_warp_sum
+    9.7%  avg    14.9 us  x  20  ragged_0_split_partial_sum
+    4.1%  avg     6.4 us  x  20  ragged_0_split_combine_sum
+    3.7%  avg     5.8 us  x  20  ragged_0_classify
+    0.8%  avg     1.2 us  x  20  ragged_0_init
+== sum-f32-d128-uniform, classified, cold L2
+20 calls: median kernel time 271.0 us, median GPU span 206.9 us
+   73.8%  avg   199.6 us  x  20  ragged_0_cta_sum
+   10.3%  avg    28.0 us  x  20  ragged_0_warp_sum
+    8.3%  avg    22.4 us  x  20  ragged_0_split_partial_sum
+    5.7%  avg    15.4 us  x  20  ragged_0_split_combine_sum
+    1.4%  avg     3.9 us  x  20  ragged_0_classify
+    0.4%  avg     1.2 us  x  20  ragged_0_init
+== sum-f32-d128-uniform, naive, warm L2
+20 calls: median kernel time 148.6 us, median GPU span 148.6 us
+  100.0%  avg   148.7 us  x  20  ragged_0_sum
+== sum-f32-d128-uniform, naive, cold L2
+20 calls: median kernel time 198.4 us, median GPU span 198.4 us
+  100.0%  avg   198.4 us  x  20  ragged_0_sum
+== sum-f32-d128-burst, classified, warm L2
+20 calls: median kernel time 189.7 us, median GPU span 158.6 us
+   77.6%  avg   147.4 us  x  20  ragged_0_split_partial_sum
+   11.9%  avg    22.6 us  x  20  ragged_0_warp_sum
+    6.5%  avg    12.3 us  x  20  ragged_0_cta_sum
+    2.2%  avg     4.1 us  x  20  ragged_0_classify
+    1.3%  avg     2.5 us  x  20  ragged_0_split_combine_sum
+    0.6%  avg     1.2 us  x  20  ragged_0_init
+== sum-f32-d128-burst, classified, cold L2
+20 calls: median kernel time 255.0 us, median GPU span 208.5 us
+   78.7%  avg   198.0 us  x  20  ragged_0_split_partial_sum
+   11.4%  avg    28.7 us  x  20  ragged_0_warp_sum
+    7.0%  avg    17.6 us  x  20  ragged_0_cta_sum
+    1.5%  avg     3.9 us  x  20  ragged_0_classify
+    0.8%  avg     2.0 us  x  20  ragged_0_split_combine_sum
+    0.5%  avg     1.2 us  x  20  ragged_0_init
+== sum-f32-d128-burst, naive, warm L2
+20 calls: median kernel time 149.3 us, median GPU span 149.3 us
+  100.0%  avg   149.4 us  x  20  ragged_0_sum
+== sum-f32-d128-burst, naive, cold L2
+20 calls: median kernel time 203.6 us, median GPU span 203.6 us
+  100.0%  avg   204.2 us  x  20  ragged_0_sum
+== sum-f32-d128-long_tail, classified, warm L2
+20 calls: median kernel time 354.6 us, median GPU span 175.1 us
+   47.0%  avg   167.6 us  x  20  ragged_0_cta_sum
+   27.8%  avg    99.2 us  x  20  ragged_0_split_partial_sum
+   22.6%  avg    80.6 us  x  20  ragged_0_warp_sum
+    1.3%  avg     4.6 us  x  20  ragged_0_split_combine_sum
+    1.0%  avg     3.6 us  x  20  ragged_0_classify
+    0.3%  avg     1.2 us  x  20  ragged_0_init
+== sum-f32-d128-long_tail, classified, cold L2
+20 calls: median kernel time 499.5 us, median GPU span 227.0 us
+   44.5%  avg   219.6 us  x  20  ragged_0_cta_sum
+   30.3%  avg   149.2 us  x  20  ragged_0_split_partial_sum
+   21.9%  avg   108.2 us  x  20  ragged_0_warp_sum
+    2.1%  avg    10.6 us  x  20  ragged_0_split_combine_sum
+    0.9%  avg     4.3 us  x  20  ragged_0_classify
+    0.2%  avg     1.2 us  x  20  ragged_0_init
+== sum-f32-d128-long_tail, naive, warm L2
+20 calls: median kernel time 180.9 us, median GPU span 180.9 us
+  100.0%  avg   181.0 us  x  20  ragged_0_sum
+== sum-f32-d128-long_tail, naive, cold L2
+20 calls: median kernel time 231.5 us, median GPU span 231.5 us
+  100.0%  avg   231.5 us  x  20  ragged_0_sum
+== sum-f32-d128-long_tail, classified, serial classes, warm L2
+20 calls: median kernel time 181.7 us, median GPU span 185.6 us
+   67.4%  avg   122.8 us  x  20  ragged_0_cta_sum
+   18.5%  avg    33.7 us  x  20  ragged_0_warp_sum
+    9.4%  avg    17.1 us  x  20  ragged_0_split_partial_sum
+    3.1%  avg     5.6 us  x  20  ragged_0_classify
+    1.1%  avg     2.0 us  x  20  ragged_0_split_combine_sum
     0.5%  avg     0.9 us  x  20  ragged_0_init
-
-== softmax-f32-d128-long_tail, classes concurrent
-20 calls: median kernel time 891.3 us, median GPU span 420.4 us
-   46.7%  avg   412.2 us  x  20  ragged_0_cta_online
-   25.4%  avg   223.7 us  x  20  ragged_0_split_partial_online
-   22.0%  avg   194.3 us  x  20  ragged_0_warp_online
-    4.6%  avg    40.7 us  x  20  ragged_0_split_normalize
-    0.7%  avg     6.5 us  x  20  ragged_0_classify
-    0.4%  avg     3.2 us  x  20  ragged_0_split_combine_online
-    0.2%  avg     1.4 us  x  20  ragged_0_init
-
-== softmax-f32-d128-long_tail, classes serial
-20 calls: median kernel time 467.0 us, median GPU span 471.3 us
-   67.4%  avg   316.6 us  x  20  ragged_0_cta_online
-   13.7%  avg    64.3 us  x  20  ragged_0_warp_online
-   13.1%  avg    61.7 us  x  20  ragged_0_split_partial_online
-    4.3%  avg    20.0 us  x  20  ragged_0_split_normalize
-    1.0%  avg     4.5 us  x  20  ragged_0_classify
-    0.4%  avg     2.0 us  x  20  ragged_0_split_combine_online
+== softmax-f32-d128-uniform, classified, warm L2
+20 calls: median kernel time 337.8 us, median GPU span 290.5 us
+   83.3%  avg   280.8 us  x  20  ragged_0_cta_online
+    4.9%  avg    16.5 us  x  20  ragged_0_warp_online
+    4.3%  avg    14.4 us  x  20  ragged_0_split_partial_online
+    3.5%  avg    11.8 us  x  20  ragged_0_split_combine_online
+    1.9%  avg     6.5 us  x  20  ragged_0_split_normalize
+    1.8%  avg     6.0 us  x  20  ragged_0_classify
+    0.3%  avg     1.1 us  x  20  ragged_0_init
+== softmax-f32-d128-uniform, classified, cold L2
+20 calls: median kernel time 371.3 us, median GPU span 325.1 us
+   84.9%  avg   316.3 us  x  20  ragged_0_cta_online
+    4.3%  avg    16.0 us  x  20  ragged_0_split_partial_online
+    3.8%  avg    14.1 us  x  20  ragged_0_warp_online
+    3.5%  avg    12.9 us  x  20  ragged_0_split_combine_online
+    1.8%  avg     6.8 us  x  20  ragged_0_split_normalize
+    1.4%  avg     5.2 us  x  20  ragged_0_classify
+    0.3%  avg     1.1 us  x  20  ragged_0_init
+== softmax-f32-d128-uniform, naive, warm L2
+20 calls: median kernel time 301.6 us, median GPU span 301.6 us
+  100.0%  avg   301.8 us  x  20  ragged_0_online
+== softmax-f32-d128-uniform, naive, cold L2
+20 calls: median kernel time 311.6 us, median GPU span 311.6 us
+  100.0%  avg   311.8 us  x  20  ragged_0_online
+== softmax-f32-d128-long_tail, classified, warm L2
+20 calls: median kernel time 815.5 us, median GPU span 397.7 us
+   47.4%  avg   386.5 us  x  20  ragged_0_cta_online
+   26.5%  avg   216.1 us  x  20  ragged_0_split_partial_online
+   21.1%  avg   172.4 us  x  20  ragged_0_warp_online
+    3.7%  avg    30.4 us  x  20  ragged_0_split_normalize
+    0.6%  avg     4.9 us  x  20  ragged_0_classify
+    0.5%  avg     4.3 us  x  20  ragged_0_split_combine_online
+    0.1%  avg     1.1 us  x  20  ragged_0_init
+== softmax-f32-d128-long_tail, classified, cold L2
+20 calls: median kernel time 827.0 us, median GPU span 417.6 us
+   48.5%  avg   401.4 us  x  20  ragged_0_cta_online
+   26.2%  avg   216.3 us  x  20  ragged_0_split_partial_online
+   20.5%  avg   169.8 us  x  20  ragged_0_warp_online
+    3.6%  avg    30.0 us  x  20  ragged_0_split_normalize
+    0.5%  avg     4.3 us  x  20  ragged_0_classify
+    0.5%  avg     4.2 us  x  20  ragged_0_split_combine_online
+    0.1%  avg     1.1 us  x  20  ragged_0_init
+== softmax-f32-d128-long_tail, naive, warm L2
+20 calls: median kernel time 486.3 us, median GPU span 486.3 us
+  100.0%  avg   487.1 us  x  20  ragged_0_online
+== softmax-f32-d128-long_tail, naive, cold L2
+20 calls: median kernel time 507.4 us, median GPU span 507.4 us
+  100.0%  avg   507.1 us  x  20  ragged_0_online
+== softmax-f32-d128-long_tail, classified, serial classes, warm L2
+20 calls: median kernel time 423.8 us, median GPU span 428.1 us
+   68.6%  avg   291.4 us  x  20  ragged_0_cta_online
+   16.0%  avg    67.8 us  x  20  ragged_0_warp_online
+    9.1%  avg    38.6 us  x  20  ragged_0_split_partial_online
+    4.2%  avg    18.0 us  x  20  ragged_0_split_normalize
+    1.1%  avg     4.6 us  x  20  ragged_0_classify
+    0.7%  avg     3.2 us  x  20  ragged_0_split_combine_online
     0.2%  avg     1.0 us  x  20  ragged_0_init
-
-== softmax-f32-d128-uniform, classes concurrent
-20 calls: median kernel time 362.9 us, median GPU span 294.7 us
-   78.5%  avg   284.1 us  x  20  ragged_0_cta_online
-    9.2%  avg    33.1 us  x  20  ragged_0_split_partial_online
-    4.2%  avg    15.1 us  x  20  ragged_0_warp_online
-    3.5%  avg    12.8 us  x  20  ragged_0_split_combine_online
-    2.6%  avg     9.2 us  x  20  ragged_0_split_normalize
-    1.7%  avg     6.1 us  x  20  ragged_0_classify
-    0.4%  avg     1.4 us  x  20  ragged_0_init
-
-== softmax-f32-d128-uniform, classes serial
-20 calls: median kernel time 299.7 us, median GPU span 304.1 us
-   95.1%  avg   285.4 us  x  20  ragged_0_cta_online
-    1.8%  avg     5.3 us  x  20  ragged_0_classify
-    0.8%  avg     2.5 us  x  20  ragged_0_warp_online
-    0.8%  avg     2.4 us  x  20  ragged_0_split_partial_online
-    0.6%  avg     1.9 us  x  20  ragged_0_split_combine_online
-    0.5%  avg     1.6 us  x  20  ragged_0_split_normalize
-    0.3%  avg     1.0 us  x  20  ragged_0_init
-
-== softmax-f32-d128-burst, classes concurrent
-20 calls: median kernel time 494.2 us, median GPU span 492.3 us
-   52.1%  avg   280.9 us  x  20  ragged_0_split_normalize
-   35.9%  avg   193.5 us  x  20  ragged_0_split_partial_online
-    9.0%  avg    48.3 us  x  20  ragged_0_warp_online
-    1.4%  avg     7.4 us  x  20  ragged_0_cta_online
-    1.0%  avg     5.3 us  x  20  ragged_0_classify
-    0.5%  avg     2.6 us  x  20  ragged_0_split_combine_online
-    0.3%  avg     1.4 us  x  20  ragged_0_init
-
-== softmax-f32-d128-burst, classes serial
-20 calls: median kernel time 487.3 us, median GPU span 491.7 us
-   57.5%  avg   280.2 us  x  20  ragged_0_split_normalize
-   39.3%  avg   191.4 us  x  20  ragged_0_split_partial_online
-    1.3%  avg     6.2 us  x  20  ragged_0_warp_online
-    0.8%  avg     3.9 us  x  20  ragged_0_classify
-    0.5%  avg     2.6 us  x  20  ragged_0_split_combine_online
-    0.3%  avg     1.6 us  x  20  ragged_0_cta_online
-    0.3%  avg     1.4 us  x  20  ragged_0_init
-
-== sum-f32-d128-uniform, classes concurrent
-20 calls: median kernel time 159.4 us, median GPU span 117.3 us
-   68.4%  avg   109.8 us  x  20  ragged_0_cta_sum
-   16.9%  avg    27.1 us  x  20  ragged_0_split_partial_sum
-    7.8%  avg    12.5 us  x  20  ragged_0_warp_sum
-    3.5%  avg     5.7 us  x  20  ragged_0_classify
-    2.5%  avg     3.9 us  x  20  ragged_0_split_combine_sum
-    0.9%  avg     1.4 us  x  20  ragged_0_init
-
-== sum-f32-d128-uniform, classes serial
-20 calls: median kernel time 117.5 us, median GPU span 122.2 us
-   89.3%  avg   105.2 us  x  20  ragged_0_cta_sum
-    4.0%  avg     4.7 us  x  20  ragged_0_classify
-    2.1%  avg     2.5 us  x  20  ragged_0_warp_sum
-    2.0%  avg     2.4 us  x  20  ragged_0_split_partial_sum
-    1.7%  avg     2.0 us  x  20  ragged_0_split_combine_sum
-    0.8%  avg     0.9 us  x  20  ragged_0_init
-
-== sum-f32-d1-long_tail, classes concurrent
-20 calls: median kernel time 30.6 us, median GPU span 27.4 us
-   31.3%  avg     9.6 us  x  20  ragged_0_split_partial_sum
-   21.8%  avg     6.7 us  x  20  ragged_0_classify
-   20.5%  avg     6.3 us  x  20  ragged_0_cta_sum
-   17.6%  avg     5.4 us  x  20  ragged_0_warp_sum
-    5.7%  avg     1.7 us  x  20  ragged_0_split_combine_sum
-    3.1%  avg     1.0 us  x  20  ragged_0_init
-
-== sum-f32-d1-long_tail, classes serial
-20 calls: median kernel time 30.6 us, median GPU span 34.0 us
-   34.4%  avg    10.5 us  x  20  ragged_0_split_partial_sum
-   22.8%  avg     7.0 us  x  20  ragged_0_classify
-   18.6%  avg     5.7 us  x  20  ragged_0_cta_sum
-   15.3%  avg     4.7 us  x  20  ragged_0_warp_sum
-    5.7%  avg     1.8 us  x  20  ragged_0_split_combine_sum
-    3.1%  avg     0.9 us  x  20  ragged_0_init
+== softmax-f32-d128-burst, classified, warm L2
+20 calls: median kernel time 539.1 us, median GPU span 487.7 us
+   49.7%  avg   267.7 us  x  20  ragged_0_split_normalize
+   36.8%  avg   198.0 us  x  20  ragged_0_split_partial_online
+   11.7%  avg    62.7 us  x  20  ragged_0_warp_online
+    0.7%  avg     3.7 us  x  20  ragged_0_classify
+    0.6%  avg     3.5 us  x  20  ragged_0_split_combine_online
+    0.3%  avg     1.8 us  x  20  ragged_0_cta_online
+    0.2%  avg     1.1 us  x  20  ragged_0_init
+== softmax-f32-d128-burst, classified, cold L2
+20 calls: median kernel time 527.7 us, median GPU span 494.5 us
+   51.0%  avg   269.6 us  x  20  ragged_0_split_normalize
+   39.9%  avg   210.9 us  x  20  ragged_0_split_partial_online
+    6.2%  avg    32.8 us  x  20  ragged_0_warp_online
+    1.1%  avg     5.6 us  x  20  ragged_0_cta_online
+    0.9%  avg     4.9 us  x  20  ragged_0_classify
+    0.6%  avg     3.4 us  x  20  ragged_0_split_combine_online
+    0.2%  avg     1.1 us  x  20  ragged_0_init
+== softmax-f32-d128-burst, naive, warm L2
+20 calls: median kernel time 488.4 us, median GPU span 488.4 us
+  100.0%  avg   487.9 us  x  20  ragged_0_online
+== softmax-f32-d128-burst, naive, cold L2
+20 calls: median kernel time 498.8 us, median GPU span 498.8 us
+  100.0%  avg   501.9 us  x  20  ragged_0_online

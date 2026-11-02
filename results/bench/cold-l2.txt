@@ -1,0 +1,17 @@
+What a cold-L2 call pays for (python -m bench.profile flush CASE/case.npz --op OP), RTX 4090, seed 711
+inputs, at commit f0bd6903feb5b75c52cd1857e666887a14ee9db7. Complete-call CUDA-event medians of 30 calls after 5:
+  warm         back-to-back calls, each started on an idle GPU
+  dirty flush  the benchmark's cold L2: zero_() a buffer of four times the L2 (288 MiB), synchronize, call;
+               the L2 is then full of dirty lines, which are written back to DRAM while the call reads
+  clean flush  read the same buffer instead (sum), synchronize, call: the L2 holds only clean lines
+The input of the D=128 cases is 128 MiB (133 us at the 4090's 1.01 TB/s).
+
+== sum-f32-d128-uniform
+method                         warm  dirty flush  clean flush   (us, median of 30 calls after 5)
+ragged classified             139.2        225.8        175.3
+ragged-naive                  163.6        214.0        162.8
+torch.segment_reduce          154.6        205.5        151.6
+== softmax-f32-d128-uniform
+method                         warm  dirty flush  clean flush   (us, median of 30 calls after 5)
+ragged classified             310.1        343.1        287.7
+ragged-naive                  315.6        326.4        275.5
