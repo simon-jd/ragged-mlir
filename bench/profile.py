@@ -18,6 +18,13 @@ benchmark's cold-L2 timing does.
 `python -m bench.profile host OUTPUT/case.npz --op sum` measures the host time
 of a call itself: the GPU is idle when each call starts, so a full launch
 queue cannot make the host wait.
+
+`python -m bench.profile flush OUTPUT/case.npz --op sum` separates what a
+cold-L2 call pays for: complete-call CUDA-event medians with a warm L2, after
+the benchmark's flush (writing a buffer of four times the L2, which leaves the
+L2 full of dirty lines that must be written back while the call reads), and
+after a clean flush (reading that buffer instead), for both ragged schedules
+and, for sum and max, torch.segment_reduce.
 """
 from __future__ import annotations
 
@@ -81,6 +88,35 @@ def host(args: argparse.Namespace) -> None:
               f"{statistics.median(samples[100:]):.1f} us over {args.calls} calls")
 
 
+def flush(args: argparse.Namespace) -> None:
+    import numpy as np
+    torch, program, values, offsets, out = load(args)
+    buffer = torch.empty((4 * torch.cuda.get_device_properties(0).L2_cache_size,), dtype=torch.uint8, device="cuda")
+    calls = {"ragged classified": lambda: program.run(values, offsets, out, select="classified"),
+             "ragged-naive": lambda: program.run(values, offsets, out, select="naive")}
+    if args.op != "softmax":
+        calls["torch.segment_reduce"] = lambda: torch.segment_reduce(values, args.op, offsets=offsets, axis=0)
+    preparations = {"warm": lambda: None, "dirty flush": buffer.zero_,
+                    "clean flush": lambda: buffer.sum(dtype=torch.int64)}
+    print(f"{'method':22} " + " ".join(f"{name:>12}" for name in preparations) + "   (us, median of "
+          f"{args.calls} calls after 5)")
+    for name, call in calls.items():
+        medians = []
+        for prepare in preparations.values():
+            samples = []
+            for _ in range(5 + args.calls):
+                prepare()
+                torch.cuda.synchronize()
+                start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                start.record()
+                call()
+                end.record()
+                end.synchronize()
+                samples.append(start.elapsed_time(end) * 1000)
+            medians.append(float(np.median(samples[5:])))
+        print(f"{name:22} " + " ".join(f"{value:12.1f}" for value in medians))
+
+
 def summarize(args: argparse.Namespace) -> None:
     lines = Path(args.trace).read_text().splitlines()
     # nsys stats prints notices before the CSV header.
@@ -127,6 +163,12 @@ def main() -> None:
     timer.add_argument("--calls", type=int, default=1000)
     timer.add_argument("--strategy", choices=("auto", "classified", "naive"), default="auto")
     timer.set_defaults(handler=host)
+    flusher = commands.add_parser("flush", help="complete-call time with a warm L2, a dirty and a clean flush")
+    flusher.add_argument("case", help="a benchmark case.npz")
+    flusher.add_argument("--op", choices=("sum", "max", "softmax"), required=True)
+    flusher.add_argument("--compiler", default="build/bin/ragged-compile")
+    flusher.add_argument("--calls", type=int, default=30)
+    flusher.set_defaults(handler=flush, strategy="auto")
     summary = commands.add_parser("summarize", help="summarize an nsys cuda_gpu_trace CSV")
     summary.add_argument("trace")
     summary.set_defaults(handler=summarize)
