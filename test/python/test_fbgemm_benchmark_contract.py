@@ -4,14 +4,13 @@ Real CPU Torch tensors inspect preprocessing. Foreign calls and GPU preflight
 are explicit test doubles; every measurement entry point is forbidden.
 """
 import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from baselines import fbgemm_reference as adapter
-from bench import matrix, report as aggregate, run as benchmark
+from bench import run as benchmark
 
 
 def forbidden(*args, **kwargs):
@@ -145,29 +144,3 @@ def test_absence_setup_failure_and_known_inapplicability_remain_distinct(tmp_pat
     assert code == expected_code and cell["status"] == expected_status
     assert result["status"] == {"absent":"partial", "broken_import":"failed", "unimplemented_op":"no_applicable_methods"}[failure]
     assert "oracle" not in cell and "complete_call_wall_until_complete_ms" not in cell
-
-
-@pytest.mark.parametrize("status,exit_code,cell_status,accepted", [
-    ("partial", 2, "unmeasured", True), ("complete", 0, "unmeasured", False),
-    ("partial", 0, "unmeasured", False), ("partial", 2, "not_applicable", False)])
-def test_matrix_retains_optional_missing_cell_without_reclassifying_it(tmp_path, status, exit_code, cell_status, accepted):
-    args = matrix.parser().parse_args(["--output", str(tmp_path), "--ops", "softmax", "--ds", "16",
-        "--dtypes", "f32", "--offsets-dtypes", "i64", "--distributions", "uniform",
-        "--normalizations", "fixed_elements", "--sizes", "small", "--methods", "fbgemm"])
-    assert "fbgemm" not in matrix.PENDING_METHODS and "fbgemm" in matrix.RUN_METHODS
-    def runner(command, **kwargs):
-        directory = Path(command[command.index("--output")+1])
-        directory.mkdir(parents=True)
-        child = {"schema":1, "status":status, "case": {"fixture":"no GPU evidence"},
-                 "methods":[{"method":"fbgemm", "status":cell_status, "reason":"synthetic optional dependency"}]}
-        (directory/"results.json").write_text(json.dumps(child))
-        return SimpleNamespace(returncode=exit_code, stdout="synthetic child fixture", stderr="")
-    result, code = matrix.run_matrix(args, preflight_fn=lambda: {"status":"ready", "scope":"synthetic host fixture"}, runner=runner)
-    assert code == (2 if accepted else 1)
-    assert result["rows"][0]["status"] == ("partial" if accepted else "failed")
-    if accepted:
-        aggregated = aggregate.build_report(tmp_path/"matrix.json", reference_method="fbgemm")
-        assert aggregate.report_exit_code(aggregated) == 2
-        cell = aggregated["rows"][0]
-        assert cell["status"] == "unmeasured" and cell["reason"] == "synthetic optional dependency"
-        assert cell["metrics"] is None and cell["speedup_wall"] is None and cell["speedup_event"] is None

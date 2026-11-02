@@ -127,7 +127,7 @@ and sanitizer runs are at the commit the benchmark measured
 | GPU tests (`test/gpu`): every op, dtype, D in {1, 2, 6, 7, 12, 16, 24, 40, 128, 1024}, i32/i64 offsets, four length distributions, empty segments, masks, in-place, checked offsets, streams, CUDA graph capture, Driver API faults; both schedules of the adaptive program and its choice; vector access compared bitwise against one feature per thread, row pipelining and concurrent classes against the rolled, serial schedule; misaligned tensors rejected; online and three-pass softmax in every class, including 65,536-row segments; class queues read back for counts, membership and per-warp order; both Triton mappings and the CUDA and CUB comparisons | 2,132 passed; 164 FBGEMM cases skip (optional package not installed) |
 | compute-sanitizer memcheck, racecheck, initcheck and synccheck on the classified, mask, checked-offsets, scheduling, selection and per-class softmax suites (671 tests, one process per suite and tool; racecheck skips eight stream-ordering tests that queue large matmuls) | 0 errors, 0 hazards |
 | lit/FileCheck tests of the dialect, passes and lowering (`test/`) | 41 passed |
-| host tests (`test/python`): cache, manifest validation, runtime contracts and stream schedule, cost model and schedule choice, benchmark harness, suite and summary | 1,731 passed |
+| host tests (`test/python`): cache, manifest validation, runtime contracts and stream schedule, cost model and schedule choice, benchmark harness, suite and summary | 1,163 passed |
 
 **Speed.** Complete-call GPU time in µs: CUDA events around the call, so host
 launch gaps count. Each process times 30 calls after 5 warm-up calls; a cell
@@ -464,6 +464,7 @@ python -m bench.chart build/summary.json --output build/speedup.svg
 | `runtime/` | CUDA Driver API module loader and launcher (nanobind) |
 | `oracle/` | float64 reference and test-case minimizer |
 | `baselines/`, `bench/` | comparison implementations and the benchmark harness |
+| `scripts/` | `bootstrap_llvm.sh` (LLVM/MLIR source build) and `build_baselines.py` (the CUDA/CUB comparison library) |
 | `test/` | lit tests (`IR`, `Transforms`, `Conversion`), host tests, GPU tests |
 | `docs/` | semantics, ABIs, optimizations, error model, design trade-offs |
 | `results/` | benchmark runs and summary, cost-model calibration and evaluation, traces, test and sanitizer summaries |

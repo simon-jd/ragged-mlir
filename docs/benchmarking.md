@@ -7,7 +7,6 @@ the length distribution and 5 repetitions, one process per run.
 `bench/summarize.py` turns the raw `results.json` files into `summary.json`,
 and `bench/calibrate.py` fits the cost model that chooses ragged's schedule
 per call and evaluates it on held-out seeds.
-(`bench/matrix.py` plans and runs larger matrices with other options.)
 
 ```sh
 python -m bench.suite --groups main --seeds 711 712 --methods ragged-classified ragged-naive \

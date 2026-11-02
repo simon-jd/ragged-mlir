@@ -5,8 +5,6 @@ import numpy as np
 import pytest
 
 from bench.run import prepare_case, summarize
-from bench.public_histogram import sample_histogram
-from scripts.run_gpu_validation import junit_counts
 
 
 def test_fixed_elements_case_records_actual_source_precision_and_input_identity():
@@ -36,32 +34,6 @@ def test_measurement_summary_preserves_slow_samples():
     assert summary["median"] == 2
     assert summary["max"] == 100
     assert summary["samples"] == [1.0, 2.0, 100.0]
-
-
-def test_skipped_gpu_cases_are_distinct_from_sanitizer_success(tmp_path):
-    path = tmp_path / "results.xml"
-    path.write_text('<testsuites><testsuite><testcase/><testcase><skipped/></testcase>'
-                    '<testcase><failure/></testcase><testcase><error/></testcase></testsuite></testsuites>')
-    assert junit_counts(path) == {"tests": 4, "skipped": 1, "failures": 1, "errors": 1}
-
-
-def test_empirical_sampling_preserves_exact_total_beyond_float_integer_range(tmp_path):
-    path = tmp_path / "histogram.json"
-    path.write_text('{"length_counts": [[1, 15], [16, 3], [1000, 1]]}')
-    n = 2**62 + 37
-    lengths = sample_histogram(path, 53, seed=92, total_elements=n)
-    assert sum(map(int, lengths)) == n
-    assert np.array_equal(lengths, sample_histogram(path, 53, seed=92, total_elements=n))
-    native = sample_histogram(path, 53, seed=92, total_elements=None)
-    assert set(native) <= {1, 16, 1000}
-
-
-@pytest.mark.parametrize("pairs", ['[]', '[[0, 1]]', '[[1, -1]]', '[[1, true]]', '[[1.5, 2]]'])
-def test_invalid_public_histogram_is_rejected(tmp_path, pairs):
-    path = tmp_path / "histogram.json"
-    path.write_text('{"length_counts": ' + pairs + '}')
-    with pytest.raises(ValueError):
-        sample_histogram(path, 2, seed=0, total_elements=10)
 
 
 @pytest.mark.parametrize('dtype', ['f32', 'bf16'])

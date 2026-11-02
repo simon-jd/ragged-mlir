@@ -48,21 +48,14 @@ def summarize(samples: list[float]) -> dict:
 
 
 def prepare_case(args):
-    histogram = getattr(args, "histogram", None)
-    if histogram is not None:
-        from bench.public_histogram import sample_histogram
-        lengths = sample_histogram(histogram, args.segments, seed=args.seed,
-                                   total_elements=args.total_elements)
-    else:
-        lengths = make_lengths(args.distribution, args.segments, seed=args.seed,
-                               total_elements=args.total_elements, mean_length=args.mean_length)
+    lengths = make_lengths(args.distribution, args.segments, seed=args.seed,
+                           total_elements=args.total_elements, mean_length=args.mean_length)
     offsets = offsets_from_lengths(lengths, args.offsets_dtype)
     values = np.random.default_rng(args.seed + 1).normal(size=(int(offsets[-1]), args.d)).astype(np.float32)
     if args.dtype == "bf16":
         values = quantize_bf16(values)
     return values, offsets, describe(lengths) | {
-        "distribution": "public_histogram" if histogram else args.distribution, "seed": args.seed,
-        "histogram_sha256": hashlib.sha256(histogram.read_bytes()).hexdigest() if histogram else None,
+        "distribution": args.distribution, "seed": args.seed,
         "normalization": "fixed_elements" if args.total_elements is not None else "fixed_segments",
         "mean_length_parameter": args.mean_length,
         "values_sha256": hashlib.sha256(values.astype("<f4").tobytes()).hexdigest(),
@@ -369,7 +362,6 @@ def main():
     parser.add_argument("--offsets-dtype", choices=("i32", "i64"), default="i64")
     parser.add_argument("--d", type=int, default=128)
     parser.add_argument("--distribution", choices=DISTRIBUTIONS, default="long_tail")
-    parser.add_argument("--histogram", type=Path, help="sample a saved public length histogram instead of synthetic lengths")
     parser.add_argument("--segments", type=int, default=16384)
     parser.add_argument("--total-elements", type=int, default=1 << 20)
     parser.add_argument("--fixed-segments", action="store_true", help="ignore --total-elements")

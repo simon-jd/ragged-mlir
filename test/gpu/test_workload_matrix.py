@@ -1,9 +1,8 @@
 """Length-distribution and mapping cross-product against the same float64 oracle.
 
-480 cells compare naive with mixed classified or legal static-split inputs from
-four synthetic sources and one public histogram. Another 48 cells preserve the
-public sample's native, unscaled lengths. Injected anchors and shifted split
-lengths are explicitly labeled transformations, never called raw UCI lengths.
+384 cells compare naive with mixed classified or legal static-split inputs from
+four synthetic length distributions. Injected anchors and shifted split
+lengths are explicitly labeled transformations.
 No CUDA device means a reported skip, not numerical validation.
 """
 from __future__ import annotations
@@ -83,10 +82,3 @@ def _compare(gpu_environment, record_property, op, dtype, d, offset_dtype, sourc
 def test_distribution_mapping_matrix(gpu_environment, record_property, op, dtype, d, offset_dtype, source, layout):
     _compare(gpu_environment, record_property, op, dtype, d, offset_dtype, source, layout)
 
-
-@pytest.mark.parametrize("op", ["sum", "max", "softmax"])
-@pytest.mark.parametrize("dtype", ["f32", "bf16"])
-@pytest.mark.parametrize("d", [1, 16, 128, 1024])
-@pytest.mark.parametrize("offset_dtype", ["i32", "i64"])
-def test_public_histogram_unscaled_matrix(gpu_environment, record_property, op, dtype, d, offset_dtype):
-    _compare(gpu_environment, record_property, op, dtype, d, offset_dtype, "uci_online_retail", "native")
