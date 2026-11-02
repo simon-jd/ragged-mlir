@@ -13,8 +13,8 @@ and schedule, nonnegative coefficients of the four terms of
 ragged.selection.features are fitted to minimize the squared relative error
 (every subset of terms is solved by least squares and the best nonnegative
 solution kept). The margin is the smallest of 0, 1, ..., 20% for which, on the
-training data, every input where classification is chosen measures no slower
-than block per segment.
+training data, every input where classification is chosen measures no more
+than NOISE (2%) slower than block per segment.
 
 `evaluate` reads a suite's runs (which also time ragged-auto, the adaptive
 program) and reports, per held-out workload and seed, both schedules, the one
@@ -33,9 +33,11 @@ import sys
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+from ragged.optimizations import Optimizations  # noqa: E402
 from ragged.selection import FAMILIES, SCHEDULES, TERMS, CostModel, family, features  # noqa: E402
 
 METHOD = {"classified": "ragged-classified", "naive": "ragged-naive"}
+NOISE = 0.02   # run-to-run spread treated as a tie
 
 
 def collect(runs: Path, l2: str = "warm", group: str = "main") -> dict:
@@ -56,10 +58,12 @@ def collect(runs: Path, l2: str = "warm", group: str = "main") -> dict:
     return found
 
 
-def shape(case: dict) -> tuple[int, int, int, int, int]:
-    """(N, B, D, element bytes, longest segment) of a recorded case."""
-    return (case["elements"], case["segments"], case["D"], 2 if case["dtype"] == "bf16" else 4,
-            case["max_length"])
+def shape(case: dict) -> tuple[int, int, int, int, int, int]:
+    """(N, B, D, longest segment, features per tile, element bytes) of a recorded case."""
+    options = Optimizations(**{name: False for name in case.get("disabled_optimizations", [])})
+    tile, vector = options.geometry(case["D"], case["dtype"])
+    return (case["elements"], case["segments"], case["D"], case["max_length"], tile * vector,
+            2 if case["dtype"] == "bf16" else 4)
 
 
 def nnls(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -104,10 +108,9 @@ def margin_for(model_data: dict, found: dict, seeds: list[int]) -> float:
             if seed not in seeds or not all(entry["methods"].get(METHOD[s]) for s in SCHEDULES):
                 continue
             case = entry["case"]
-            n, b, d, element, longest = shape(case)
-            chosen, _ = model.choose(case["op"], n, b, d, element, longest)
+            chosen, _ = model.choose(case["op"], *shape(case))
             measured = {s: statistics.median(entry["methods"][METHOD[s]]) for s in SCHEDULES}
-            safe &= chosen == "naive" or measured["classified"] <= measured["naive"]
+            safe &= chosen == "naive" or measured["classified"] <= measured["naive"] * (1 + NOISE)
         if safe:
             return percent / 100
     return 0.2
@@ -119,7 +122,9 @@ def run_fit(args: argparse.Namespace) -> None:
     data = {"version": 1, "coefficients": coefficients, "margin": 0.0,
             "calibration": {"runs": str(args.runs), "train_seeds": args.train, "l2": "warm",
                             "statistic": "median over processes of each process's median complete-call time",
-                            "terms": "t_us = c0 + c1*N*D*bytes/MiB + c2*L*D*bytes/MiB + c3*B/1000",
+                            "terms": "t_us = c0 + c1*M + c2*S + c3*B/1000 + c4*M*log2(skew) + c5*MiB, "
+                                     "M = N*D/2^18, S = L*d_tile*d_vector/128/1000, skew = L*B/N, "
+                                     "MiB = N*D*bytes/2^20",
                             "inputs": len(rows)}}
     data["margin"] = margin_for(data, found, args.train)
     args.output.write_text(json.dumps(data, indent=2) + "\n")
@@ -128,8 +133,7 @@ def run_fit(args: argparse.Namespace) -> None:
     print(f"{'case':30} {'seed':>4} {'classified':>10} {'pred':>7} {'naive':>8} {'pred':>7}  chosen")
     for row in rows:
         entry = found[(row["case"], row["seed"])]
-        n, b, d, element, longest = shape(entry["case"])
-        chosen, info = model.choose(entry["case"]["op"], n, b, d, element, longest)
+        chosen, info = model.choose(entry["case"]["op"], *shape(entry["case"]))
         predicted = info["predicted_us"]
         print(f"{row['case']:30} {row['seed']:>4} {row['classified']:10.1f} {predicted['classified']:7.1f} "
               f"{row['naive']:8.1f} {predicted['naive']:7.1f}  {chosen}")
@@ -147,8 +151,7 @@ def run_evaluate(args: argparse.Namespace) -> None:
             if seed not in args.seeds or not entry["methods"].get("ragged-auto"):
                 continue
             case = entry["case"]
-            n, b, d, element, longest = shape(case)
-            chosen, _ = model.choose(case["op"], n, b, d, element, longest)
+            chosen, _ = model.choose(case["op"], *shape(case))
             times = {method: statistics.median(values) for method, values in entry["methods"].items()}
             naive_runs = sorted(entry["methods"]["ragged-naive"])
             q1, q3 = np.percentile(naive_runs, [25, 75])

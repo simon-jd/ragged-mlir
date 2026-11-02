@@ -38,7 +38,9 @@ def test_both_schedules_match_the_oracle_and_auto_follows_the_model(gpu_environm
         assert ("classify" in " ".join(report.kernel_names)) == (select == "classified")
         assert_matches(output.float().cpu().numpy(), values, offsets, operation=op, input_dtype=dtype)
     longest = int(lengths.max())
-    expected, _ = default_model().choose(op, len(values), len(lengths), d, 2 if dtype == "bf16" else 4, longest)
+    expected, _ = default_model().choose(op, len(values), len(lengths), d, longest,
+                                         program._metadata["d_tile"] * program._metadata["d_vector"],
+                                         2 if dtype == "bf16" else 4)
     output, report = run(torch, program, device_values, device_offsets, max_len=longest)
     assert report.selected == expected and report.selection["max_len"] == longest
     assert_matches(output.float().cpu().numpy(), values, offsets, operation=op, input_dtype=dtype)

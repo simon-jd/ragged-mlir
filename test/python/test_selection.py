@@ -14,7 +14,7 @@ from test_runtime_classified import host_program
 
 def model(classified, naive, margin=0.0):
     return CostModel.from_dict({"version": 1, "margin": margin,
-                                "coefficients": {name: {"classified": classified, "naive": naive}
+                                "coefficients": {name: {"classified": list(classified) + [0] * (6 - len(classified)), "naive": list(naive) + [0] * (6 - len(naive))}
                                                  for name in ("reduce", "softmax")}})
 
 
@@ -24,15 +24,19 @@ def test_shipped_model_is_valid_and_records_its_calibration():
     assert json.loads(MODEL_PATH.read_text())["calibration"]
 
 
-def test_features_scale_bytes_and_segments():
-    assert features(2**20, 1000, 1, 4, 2**18) == (1.0, 4.0, 1.0, 1.0)
+def test_features_count_elements_thread_elements_segments_and_skew():
+    # 2^20 rows of D=4 in 1024 segments (mean 1024 rows), longest 2^14 rows
+    # (skew 16), 32 features per tile.
+    assert features(2**20, 1024, 4, 2**14, 32) == (1.0, 16.0, 4.096, 1.024, 64.0, 16.0)
+    assert features(2**20, 1024, 4, 2**14, 32, 2)[5] == 8.0
+    assert features(64, 1, 1, 64, 1)[4] == 0   # no skew
 
 
 @pytest.mark.parametrize("bad", [{"version": 2}, {"version": 1, "margin": 0.1, "coefficients": {}},
                                  {"version": 1, "margin": 1.0, "coefficients": {
-                                     name: {"classified": [0] * 4, "naive": [0] * 4} for name in ("reduce", "softmax")}},
+                                     name: {"classified": [0] * 6, "naive": [0] * 6} for name in ("reduce", "softmax")}},
                                  {"version": 1, "margin": 0.0, "coefficients": {
-                                     name: {"classified": [-1, 0, 0, 0], "naive": [0] * 4} for name in ("reduce", "softmax")}}])
+                                     name: {"classified": [-1, 0, 0, 0, 0, 0], "naive": [0] * 6} for name in ("reduce", "softmax")}}])
 def test_invalid_models_are_rejected(bad):
     with pytest.raises(CacheMismatch):
         CostModel.from_dict(bad)
@@ -41,18 +45,18 @@ def test_invalid_models_are_rejected(bad):
 def test_long_segments_choose_classification_and_short_ones_block_per_segment():
     # Block per segment is cheaper to launch but pays for the longest segment.
     chosen = model(classified=[20, 1, 0, 0], naive=[10, 1, 4, 0])
-    assert chosen.choose("sum", 2**20, 16384, 1, 4, 64)[0] == "naive"
-    selected, info = chosen.choose("sum", 2**20, 16384, 1, 4, 2**20)
+    assert chosen.choose("sum", 2**20, 16384, 1, 64, 1)[0] == "naive"
+    selected, info = chosen.choose("sum", 2**20, 16384, 1, 2**20, 1)
     assert selected == "classified" and info["predicted_us"]["naive"] > info["predicted_us"]["classified"]
 
 
 def test_margin_keeps_block_per_segment_when_classification_is_barely_faster():
-    assert model([10, 0, 0, 0], [10.5, 0, 0, 0]).choose("max", 1, 1, 1, 4, 1)[0] == "classified"
-    assert model([10, 0, 0, 0], [10.5, 0, 0, 0], margin=0.1).choose("max", 1, 1, 1, 4, 1)[0] == "naive"
+    assert model([10, 0, 0, 0], [10.5, 0, 0, 0]).choose("max", 1, 1, 1, 1, 1)[0] == "classified"
+    assert model([10, 0, 0, 0], [10.5, 0, 0, 0], margin=0.1).choose("max", 1, 1, 1, 1, 1)[0] == "naive"
 
 
 def test_unknown_longest_segment_keeps_classification():
-    assert model([100, 0, 0, 0], [1, 0, 0, 0]).choose("softmax", 1, 1, 1, 4, None)[0] == "classified"
+    assert model([100, 0, 0, 0], [1, 0, 0, 0]).choose("softmax", 1, 1, 1, None, 1)[0] == "classified"
 
 
 class Companion:

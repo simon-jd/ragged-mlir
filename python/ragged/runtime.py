@@ -278,9 +278,10 @@ class CompiledProgram:
         if choice is None:
             if len(self._choices) >= 256:
                 self._choices.clear()
+            span = self._metadata.get("d_tile", 32) * self._metadata.get("d_vector", 1)
             element = 2 if self.spec.dtype == "bf16" else 4
             choice = self._choices[key] = default_model().choose(self.spec.op, n, b, self.spec.feature_dim,
-                                                                 element, max_len)
+                                                                 max_len, span, element)
         return choice
 
     def _layout(self, metadata: dict[str, Any], validation: bool, n: int, b: int,
