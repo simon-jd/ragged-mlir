@@ -1,0 +1,982 @@
+{
+  "schema": 1,
+  "status": "complete",
+  "timestamp_unix_ns": 1793590871670903045,
+  "command": [
+    "/home/postedism/Desktop/ragged-mlir/bench/run.py",
+    "--compiler",
+    "build/bin/ragged-compile",
+    "--native-library",
+    "build-baselines/libragged_baselines.so",
+    "--op",
+    "softmax",
+    "--dtype",
+    "f32",
+    "--d",
+    "1",
+    "--distribution",
+    "burst",
+    "--segments",
+    "16384",
+    "--total-elements",
+    "1048576",
+    "--methods",
+    "ragged-classified",
+    "ragged-naive",
+    "--seed",
+    "711",
+    "--l2",
+    "both",
+    "--triton-cache",
+    "build/calibration/triton-cache",
+    "--output",
+    "build/calibration/main/softmax-f32-d1-burst/seed-711/rep-3"
+  ],
+  "python": "3.12.13",
+  "methods": [
+    {
+      "method": "ragged-classified",
+      "cold_compile_wall_ms": 585.67392,
+      "hot_cache_wall_ms": 46.215033,
+      "cache_key": "b4549b8a26fb741c18a7f467d8980a9ebd09b7193af43745d34c322b1bdadb01",
+      "compiler_sha256": "9a27f98f79bd1741ba51694fa0461833d62e4947a4f7126fd6fb1625689b1b2e",
+      "toolchain": {
+        "chip": "sm_89",
+        "dialect_version": "1",
+        "features": "+ptx80",
+        "llvm_commit": "0d261d1ca552c95a8f007e061c787ac7132fbcbc",
+        "llvm_revision_source": "llvm-vcs-header",
+        "llvm_version": "23.1.3",
+        "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Fri_May_08_10:53:34_AM_PDT_2026\nCuda compilation tools, release 13.2, V13.2.86\nBuild cuda_13.2.r13.2/compiler.37953736_0"
+      },
+      "spec": {
+        "op": "softmax",
+        "dtype": "f32",
+        "feature_dim": 1,
+        "offsets_dtype": "i64",
+        "hints": {
+          "max_len": null,
+          "min_len": null,
+          "offsets_checked": false
+        },
+        "strategy": "auto",
+        "alias": "none",
+        "chip": "sm_89",
+        "force_fusion": false,
+        "scale": 1.0,
+        "debug_visits": false,
+        "mask": false,
+        "optimizations": {
+          "classification": true,
+          "online_fusion": true,
+          "warp_mapping": true,
+          "split_mapping": true,
+          "shuffle": true,
+          "pointwise_fusion": true,
+          "row_pipelining": true,
+          "vectorize": true,
+          "feature_tile": null
+        },
+        "smem_per_cta": 49152,
+        "regs_budget": 65536
+      },
+      "last_execution_report": {
+        "classes": [
+          "warp",
+          "cta",
+          "split"
+        ],
+        "thresholds": [
+          32,
+          4096
+        ],
+        "grids": [
+          [
+            1,
+            1,
+            1
+          ],
+          [
+            128,
+            1,
+            1
+          ],
+          [
+            1280,
+            1,
+            1
+          ],
+          [
+            192,
+            1,
+            8
+          ],
+          [
+            1536,
+            1,
+            1
+          ],
+          [
+            192,
+            1,
+            8
+          ],
+          [
+            3072,
+            1,
+            1
+          ]
+        ],
+        "workspace_bytes": 540632,
+        "cache_key": "b4549b8a26fb741c18a7f467d8980a9ebd09b7193af43745d34c322b1bdadb01",
+        "fallback_reason": "length bounds require device classification",
+        "mode": "validated",
+        "kernel_names": [
+          "ragged_0_init",
+          "ragged_0_classify",
+          "ragged_0_cta_online",
+          "ragged_0_split_partial_online",
+          "ragged_0_split_combine_online",
+          "ragged_0_split_normalize",
+          "ragged_0_warp_online"
+        ],
+        "host_enqueue_ms": 0.020378967747092247,
+        "device_elapsed_ms": null,
+        "cache_hit": false,
+        "validation_workspace_bytes": 0,
+        "validation_host_ms": null,
+        "optimizations": {
+          "requested": {
+            "classification": true,
+            "online_fusion": true,
+            "warp_mapping": true,
+            "split_mapping": true,
+            "shuffle": true,
+            "pointwise_fusion": true,
+            "row_pipelining": true,
+            "vectorize": true,
+            "feature_tile": null
+          },
+          "effective": {
+            "classification": true,
+            "online_fusion": true,
+            "pointwise_fusion": false,
+            "row_pipelining": true,
+            "shuffle": true,
+            "split_mapping": true,
+            "vectorize": false,
+            "warp_mapping": true
+          }
+        },
+        "d_tile": 1,
+        "d_vector": 1,
+        "pointwise_materialized": false,
+        "resources": {
+          "kernels": [
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_init",
+              "registers_per_cta": 768,
+              "registers_per_thread": 6,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_classify",
+              "registers_per_cta": 2304,
+              "registers_per_thread": 18,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_warp_online",
+              "registers_per_cta": 1536,
+              "registers_per_thread": 48,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 32
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_cta_online",
+              "registers_per_cta": 6144,
+              "registers_per_thread": 48,
+              "shared_bytes_per_cta": 1024,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 1024,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_split_partial_online",
+              "registers_per_cta": 4608,
+              "registers_per_thread": 36,
+              "shared_bytes_per_cta": 1024,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 1024,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_split_combine_online",
+              "registers_per_cta": 4864,
+              "registers_per_thread": 38,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_split_normalize",
+              "registers_per_cta": 4864,
+              "registers_per_thread": 38,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_offsets_init",
+              "registers_per_cta": 1280,
+              "registers_per_thread": 10,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_offsets_check",
+              "registers_per_cta": 1792,
+              "registers_per_thread": 14,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 128
+            }
+          ],
+          "requested": {
+            "regs_budget": 65536,
+            "smem_per_cta": 49152
+          },
+          "source": "ptxas",
+          "status": "measured"
+        },
+        "streams": 3,
+        "selected": "classified",
+        "selection": {
+          "forced": true
+        }
+      },
+      "max_len_given": true,
+      "oracle": {
+        "finite_values": 1048576,
+        "nan_values": 0,
+        "max_abs_error": 1.647228922707633e-09,
+        "max_fraction_of_tolerance": 0.000723739291169234
+      },
+      "complete_call_cuda_event_ms": {
+        "count": 30,
+        "median": 0.04814399965107441,
+        "min": 0.04505600035190582,
+        "max": 0.05427199974656105,
+        "p90": 0.050287998467683795,
+        "samples": [
+          0.05427199974656105,
+          0.05129599943757057,
+          0.04851200059056282,
+          0.04601600021123886,
+          0.050175998359918594,
+          0.047775998711586,
+          0.050175998359918594,
+          0.046751998364925385,
+          0.050144001841545105,
+          0.0490880012512207,
+          0.04710400104522705,
+          0.046431999653577805,
+          0.047775998711586,
+          0.048928000032901764,
+          0.04681599885225296,
+          0.04540799930691719,
+          0.04608000069856644,
+          0.046112000942230225,
+          0.050175998359918594,
+          0.05222399905323982,
+          0.05011200159788132,
+          0.050175998359918594,
+          0.04915200173854828,
+          0.04608000069856644,
+          0.0488319993019104,
+          0.04915200173854828,
+          0.04505600035190582,
+          0.045823998749256134,
+          0.04608000069856644,
+          0.04620800167322159
+        ]
+      },
+      "complete_call_wall_until_complete_ms": {
+        "count": 30,
+        "median": 0.055132,
+        "min": 0.05247,
+        "max": 0.075638,
+        "p90": 0.0583601,
+        "samples": [
+          0.075638,
+          0.059338,
+          0.056149,
+          0.053602,
+          0.057323,
+          0.054876,
+          0.058272,
+          0.053132,
+          0.05721,
+          0.056221,
+          0.053811,
+          0.053421,
+          0.054251,
+          0.055767,
+          0.053225,
+          0.052782,
+          0.05247,
+          0.053759,
+          0.057367,
+          0.059153,
+          0.057171,
+          0.057223,
+          0.056439,
+          0.052953,
+          0.055388,
+          0.056009,
+          0.052666,
+          0.052698,
+          0.052771,
+          0.053032
+        ]
+      },
+      "cold_l2": {
+        "complete_call_cuda_event_ms": {
+          "count": 30,
+          "median": 0.06320000067353249,
+          "min": 0.05734400078654289,
+          "max": 0.12697599828243256,
+          "p90": 0.06538239717483521,
+          "samples": [
+            0.12697599828243256,
+            0.06963200122117996,
+            0.06348799914121628,
+            0.06716799736022949,
+            0.062463998794555664,
+            0.06348799914121628,
+            0.06518399715423584,
+            0.0586559996008873,
+            0.06451199948787689,
+            0.062463998794555664,
+            0.06451199948787689,
+            0.06451199948787689,
+            0.06307200342416763,
+            0.06252799928188324,
+            0.06272000074386597,
+            0.060127999633550644,
+            0.06451199948787689,
+            0.06428799778223038,
+            0.059328000992536545,
+            0.062463998794555664,
+            0.06470400094985962,
+            0.061055999249219894,
+            0.062463998794555664,
+            0.06332799792289734,
+            0.06451199948787689,
+            0.05734400078654289,
+            0.06348799914121628,
+            0.058368001133203506,
+            0.060416001826524734,
+            0.062463998794555664
+          ]
+        },
+        "complete_call_wall_until_complete_ms": {
+          "count": 30,
+          "median": 0.070537,
+          "min": 0.064947,
+          "max": 0.147249,
+          "p90": 0.0724989,
+          "samples": [
+            0.147249,
+            0.078228,
+            0.071658,
+            0.074424,
+            0.070636,
+            0.071337,
+            0.072285,
+            0.066213,
+            0.071881,
+            0.069687,
+            0.071334,
+            0.07162,
+            0.070334,
+            0.069732,
+            0.070493,
+            0.06688,
+            0.071556,
+            0.071616,
+            0.066162,
+            0.069728,
+            0.071882,
+            0.068738,
+            0.069561,
+            0.070305,
+            0.071631,
+            0.064947,
+            0.070581,
+            0.065248,
+            0.067942,
+            0.069551
+          ]
+        },
+        "flush_bytes": 301989888,
+        "scope": "every call starts after overwriting the flush buffer and synchronizing"
+      },
+      "peak_additional_allocated_bytes": 4735488,
+      "allocator_baseline_allocated_bytes": 306315776,
+      "allocator_peak_allocated_bytes": 311051264,
+      "allocator_baseline_reserved_bytes": 325058560,
+      "allocator_peak_reserved_bytes": 325058560,
+      "memory_scope": "PyTorch allocator counters; excludes CUDA context/module and non-allocator allocations",
+      "allocation_scope": "output, temporaries, workspace, NJT construction and dtype conversions",
+      "timing_scope": "all kernels and host enqueue gaps; inputs already on device; no CUDA graph",
+      "warmup_calls": 5,
+      "status": "measured"
+    },
+    {
+      "method": "ragged-naive",
+      "cold_compile_wall_ms": 178.103527,
+      "hot_cache_wall_ms": 21.402827,
+      "cache_key": "713c8312018cc7f90d55d256d54c12d0194a71cf00eab86cf138ac27ddb3b038",
+      "compiler_sha256": "9a27f98f79bd1741ba51694fa0461833d62e4947a4f7126fd6fb1625689b1b2e",
+      "toolchain": {
+        "chip": "sm_89",
+        "dialect_version": "1",
+        "features": "+ptx80",
+        "llvm_commit": "0d261d1ca552c95a8f007e061c787ac7132fbcbc",
+        "llvm_revision_source": "llvm-vcs-header",
+        "llvm_version": "23.1.3",
+        "ptxas_version": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2026 NVIDIA Corporation\nBuilt on Fri_May_08_10:53:34_AM_PDT_2026\nCuda compilation tools, release 13.2, V13.2.86\nBuild cuda_13.2.r13.2/compiler.37953736_0"
+      },
+      "spec": {
+        "op": "softmax",
+        "dtype": "f32",
+        "feature_dim": 1,
+        "offsets_dtype": "i64",
+        "hints": {
+          "max_len": null,
+          "min_len": null,
+          "offsets_checked": false
+        },
+        "strategy": "naive",
+        "alias": "none",
+        "chip": "sm_89",
+        "force_fusion": false,
+        "scale": 1.0,
+        "debug_visits": false,
+        "mask": false,
+        "optimizations": {
+          "classification": true,
+          "online_fusion": true,
+          "warp_mapping": true,
+          "split_mapping": true,
+          "shuffle": true,
+          "pointwise_fusion": true,
+          "row_pipelining": true,
+          "vectorize": true,
+          "feature_tile": null
+        },
+        "smem_per_cta": 49152,
+        "regs_budget": 65536
+      },
+      "last_execution_report": {
+        "classes": [
+          "cta"
+        ],
+        "thresholds": [
+          32,
+          4096
+        ],
+        "grids": [
+          [
+            16384,
+            1,
+            1
+          ]
+        ],
+        "workspace_bytes": 0,
+        "cache_key": "713c8312018cc7f90d55d256d54c12d0194a71cf00eab86cf138ac27ddb3b038",
+        "fallback_reason": "naive strategy requested",
+        "mode": "validated",
+        "kernel_names": [
+          "ragged_0_online"
+        ],
+        "host_enqueue_ms": 0.010452000424265862,
+        "device_elapsed_ms": null,
+        "cache_hit": false,
+        "validation_workspace_bytes": 0,
+        "validation_host_ms": null,
+        "optimizations": {
+          "requested": {
+            "classification": true,
+            "online_fusion": true,
+            "warp_mapping": true,
+            "split_mapping": true,
+            "shuffle": true,
+            "pointwise_fusion": true,
+            "row_pipelining": true,
+            "vectorize": true,
+            "feature_tile": null
+          },
+          "effective": {
+            "classification": false,
+            "online_fusion": true,
+            "pointwise_fusion": false,
+            "row_pipelining": true,
+            "shuffle": false,
+            "split_mapping": false,
+            "vectorize": false,
+            "warp_mapping": false
+          }
+        },
+        "d_tile": 1,
+        "d_vector": 1,
+        "pointwise_materialized": false,
+        "resources": {
+          "kernels": [
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_online",
+              "registers_per_cta": 5120,
+              "registers_per_thread": 40,
+              "shared_bytes_per_cta": 1024,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 1024,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_offsets_init",
+              "registers_per_cta": 1280,
+              "registers_per_thread": 10,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 128
+            },
+            {
+              "dynamic_shared_bytes": 0,
+              "name": "ragged_0_offsets_check",
+              "registers_per_cta": 1792,
+              "registers_per_thread": 14,
+              "shared_bytes_per_cta": 0,
+              "spill_load_bytes": 0,
+              "spill_store_bytes": 0,
+              "stack_frame_bytes": 0,
+              "static_shared_bytes": 0,
+              "threads_per_cta": 128
+            }
+          ],
+          "requested": {
+            "regs_budget": 65536,
+            "smem_per_cta": 49152
+          },
+          "source": "ptxas",
+          "status": "measured"
+        },
+        "streams": 1,
+        "selected": "naive",
+        "selection": {}
+      },
+      "max_len_given": true,
+      "oracle": {
+        "finite_values": 1048576,
+        "nan_values": 0,
+        "max_abs_error": 1.77813797193338e-09,
+        "max_fraction_of_tolerance": 0.0008152148762684254
+      },
+      "complete_call_cuda_event_ms": {
+        "count": 30,
+        "median": 0.034671999514102936,
+        "min": 0.032735999673604965,
+        "max": 0.04476799815893173,
+        "p90": 0.03688320107758045,
+        "samples": [
+          0.04476799815893173,
+          0.0390079990029335,
+          0.03705599904060364,
+          0.03680000081658363,
+          0.03379200026392937,
+          0.034591998904943466,
+          0.03481600061058998,
+          0.03276799991726875,
+          0.03686400130391121,
+          0.03299200162291527,
+          0.03280000016093254,
+          0.033504001796245575,
+          0.03481600061058998,
+          0.036768000572919846,
+          0.03481600061058998,
+          0.034752000123262405,
+          0.03379200026392937,
+          0.03481600061058998,
+          0.03276799991726875,
+          0.03497600182890892,
+          0.033504001796245575,
+          0.033440001308918,
+          0.03455999866127968,
+          0.032735999673604965,
+          0.03481600061058998,
+          0.03481600061058998,
+          0.03379200026392937,
+          0.03276799991726875,
+          0.03481600061058998,
+          0.03379200026392937
+        ]
+      },
+      "complete_call_wall_until_complete_ms": {
+        "count": 30,
+        "median": 0.041525,
+        "min": 0.039323,
+        "max": 0.063444,
+        "p90": 0.0438845,
+        "samples": [
+          0.063444,
+          0.046856,
+          0.044231,
+          0.043759,
+          0.040923,
+          0.043559,
+          0.041838,
+          0.040217,
+          0.043846,
+          0.040444,
+          0.03989,
+          0.040284,
+          0.041608,
+          0.04335,
+          0.042217,
+          0.042053,
+          0.040478,
+          0.042003,
+          0.040336,
+          0.042138,
+          0.040595,
+          0.04364,
+          0.040766,
+          0.039323,
+          0.041442,
+          0.041638,
+          0.040562,
+          0.039654,
+          0.041274,
+          0.040545
+        ]
+      },
+      "cold_l2": {
+        "complete_call_cuda_event_ms": {
+          "count": 30,
+          "median": 0.04403200000524521,
+          "min": 0.04198399931192398,
+          "max": 0.0530879981815815,
+          "p90": 0.04515840038657189,
+          "samples": [
+            0.0530879981815815,
+            0.04608000069856644,
+            0.04416000097990036,
+            0.04390399903059006,
+            0.04198399931192398,
+            0.04403200000524521,
+            0.04403200000524521,
+            0.04473600164055824,
+            0.04323200136423111,
+            0.04505600035190582,
+            0.04364800080657005,
+            0.0427200011909008,
+            0.04403200000524521,
+            0.043007999658584595,
+            0.043007999658584595,
+            0.04403200000524521,
+            0.04710400104522705,
+            0.04505600035190582,
+            0.043168000876903534,
+            0.04505600035190582,
+            0.04335999861359596,
+            0.043007999658584595,
+            0.04403200000524521,
+            0.04403200000524521,
+            0.04198399931192398,
+            0.04403200000524521,
+            0.043007999658584595,
+            0.04281599819660187,
+            0.04371200129389763,
+            0.04403200000524521
+          ]
+        },
+        "complete_call_wall_until_complete_ms": {
+          "count": 30,
+          "median": 0.050756,
+          "min": 0.049598,
+          "max": 0.062962,
+          "p90": 0.052372800000000004,
+          "samples": [
+            0.062962,
+            0.053892,
+            0.051293,
+            0.050553,
+            0.049973,
+            0.051184,
+            0.050949,
+            0.052204,
+            0.050609,
+            0.051662,
+            0.050939,
+            0.049885,
+            0.051289,
+            0.050072,
+            0.050697,
+            0.051242,
+            0.054289,
+            0.051519,
+            0.050736,
+            0.052098,
+            0.050645,
+            0.050439,
+            0.050658,
+            0.050971,
+            0.049598,
+            0.050649,
+            0.050161,
+            0.049818,
+            0.050329,
+            0.050776
+          ]
+        },
+        "flush_bytes": 301989888,
+        "scope": "every call starts after overwriting the flush buffer and synchronizing"
+      },
+      "peak_additional_allocated_bytes": 4194304,
+      "allocator_baseline_allocated_bytes": 306315776,
+      "allocator_peak_allocated_bytes": 310510080,
+      "allocator_baseline_reserved_bytes": 325058560,
+      "allocator_peak_reserved_bytes": 325058560,
+      "memory_scope": "PyTorch allocator counters; excludes CUDA context/module and non-allocator allocations",
+      "allocation_scope": "output, temporaries, workspace, NJT construction and dtype conversions",
+      "timing_scope": "all kernels and host enqueue gaps; inputs already on device; no CUDA graph",
+      "warmup_calls": 5,
+      "status": "measured"
+    }
+  ],
+  "harness_sha256": "cd26946c8f4a751d41d0f047e08954a7258704c09cd2f63452f32738ba36b572",
+  "source": {
+    "git_commit": "686d9ceb880b342d6a5863c549c8af9f7e05750c",
+    "tracked_changes": []
+  },
+  "l2": "both",
+  "torch": "2.14.1+cu132",
+  "torch_cuda": "13.2",
+  "device": {
+    "name": "NVIDIA GeForce RTX 4090",
+    "capability": [
+      8,
+      9
+    ],
+    "total_memory_bytes": 25249579008,
+    "multiprocessors": 128
+  },
+  "cuda_driver": {
+    "device_ordinal": 0,
+    "l2_cache_size_bytes": 75497472,
+    "driver_package_version": "595.99.02",
+    "device_uuid_hex": "048ba00a2056d3c0630991c78ab69d63",
+    "driver_package_probe": {
+      "command": [
+        "/usr/bin/nvidia-smi",
+        "--query-gpu=driver_version",
+        "--format=csv,noheader"
+      ],
+      "exit_code": 0,
+      "stdout": "595.99.02\n",
+      "stderr": ""
+    },
+    "cuda_supported_version_status": 0,
+    "cuda_supported_version": 13020,
+    "cuInit_status": 0,
+    "device_get_status": 0,
+    "uuid_query_status": 0,
+    "l2_query_status": 0
+  },
+  "case": {
+    "segments": 16384,
+    "elements": 1048576,
+    "min_length": 0,
+    "max_length": 6394,
+    "histogram_lower_bounds": [
+      0,
+      1,
+      2,
+      8,
+      32,
+      33,
+      128,
+      1024,
+      4096,
+      4097,
+      16384
+    ],
+    "histogram_counts": [
+      9867,
+      6354,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      163,
+      0
+    ],
+    "lengths_sha256": "216b77cf015c1a5d187520ba06c0df602e67aace42f659ddc294cb3ac1361b90",
+    "distribution": "burst",
+    "seed": 711,
+    "histogram_sha256": null,
+    "normalization": "fixed_elements",
+    "mean_length_parameter": 64,
+    "values_sha256": "2417aa90b69b2b193e6932079b39155b25ae77d43ac69699284f2f39ca062c0f",
+    "offsets_sha256": "e3aa31f15edab4fac79b2c60e6eab8d4100b49f58ad19828719e36ff69455472",
+    "op": "softmax",
+    "dtype": "f32",
+    "offsets_dtype": "i64",
+    "D": 1,
+    "scale": 1.0,
+    "mask_sha256": null,
+    "disabled_optimizations": [],
+    "feature_tile": null,
+    "length_bounds": {},
+    "njt_sequence_bounds": {
+      "min_len": 0,
+      "max_len": 6394
+    },
+    "values_bytes": 4194304,
+    "offsets_bytes": 131080,
+    "mask_bytes": 0,
+    "input_bytes": 4325384,
+    "input_bytes_scope": "resident values, offsets and optional mask; excludes outputs and method workspace"
+  },
+  "gpu_state": {
+    "before": {
+      "time_unix_ns": 1793590872428103689,
+      "host_loadavg": [
+        1.697265625,
+        2.041015625,
+        2.25
+      ],
+      "gpus": [
+        {
+          "index": "0",
+          "uuid": "GPU-048ba00a-2056-d3c0-6309-91c78ab69d63",
+          "name": "NVIDIA GeForce RTX 4090",
+          "pstate": "P0",
+          "clocks.sm": "2520",
+          "clocks.mem": "10251",
+          "clocks.max.sm": "3105",
+          "clocks.max.mem": "10501",
+          "temperature.gpu": "43",
+          "power.draw": "55.01",
+          "power.limit": "450.00",
+          "utilization.gpu": "0",
+          "utilization.memory": "0",
+          "memory.used": "1426",
+          "clocks_event_reasons.active": "0x0000000000000000"
+        }
+      ],
+      "compute_processes": [
+        {
+          "pid": "1951965",
+          "name": "/opt/google/chrome/chrome --type=gpu-process --gpu-recent-crash-count=0 --ozone-platform=wayland --render-node-override=/dev/dri/renderD128 --crashpad-handler-pid=1951926 --enable-crash-reporter=886d240b-a185-4240-9432-1db2cef94e54? --change-stack-guard-on-fork=enable --gpu-preferences=YAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAASAAAAAAAAAABAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAMAAAAAQAAAAAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --metrics-shmem-handle=4?i?3005739583979872737?11032471760737545951?262144 --field-trial-handle=3?i?3213359972210005036?3334461970449488570?262144 --enable-features=GlicHorizontalTabToolbarButton --variations-seed-version=20261030-090037.398000-production --pseudonymization-salt-handle=7?i?15516853701538085828?2985911167647596185?4 --trace-process-track-uuid=3190708988185955192",
+          "used_memory_mib": "181"
+        },
+        {
+          "pid": "820966",
+          "name": "/home/postedism/Desktop/ragged-mlir/.venv-pinned-cu132-20261023T025248Z/bin/python",
+          "used_memory_mib": "696"
+        }
+      ]
+    },
+    "after": {
+      "time_unix_ns": 1793590873640073202,
+      "host_loadavg": [
+        1.697265625,
+        2.041015625,
+        2.25
+      ],
+      "gpus": [
+        {
+          "index": "0",
+          "uuid": "GPU-048ba00a-2056-d3c0-6309-91c78ab69d63",
+          "name": "NVIDIA GeForce RTX 4090",
+          "pstate": "P0",
+          "clocks.sm": "2520",
+          "clocks.mem": "10251",
+          "clocks.max.sm": "3105",
+          "clocks.max.mem": "10501",
+          "temperature.gpu": "43",
+          "power.draw": "54.80",
+          "power.limit": "450.00",
+          "utilization.gpu": "0",
+          "utilization.memory": "0",
+          "memory.used": "1488",
+          "clocks_event_reasons.active": "0x0000000000000000"
+        }
+      ],
+      "compute_processes": [
+        {
+          "pid": "1951965",
+          "name": "/opt/google/chrome/chrome --type=gpu-process --gpu-recent-crash-count=0 --ozone-platform=wayland --render-node-override=/dev/dri/renderD128 --crashpad-handler-pid=1951926 --enable-crash-reporter=886d240b-a185-4240-9432-1db2cef94e54? --change-stack-guard-on-fork=enable --gpu-preferences=YAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAASAAAAAAAAAABAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAMAAAAAQAAAAAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --metrics-shmem-handle=4?i?3005739583979872737?11032471760737545951?262144 --field-trial-handle=3?i?3213359972210005036?3334461970449488570?262144 --enable-features=GlicHorizontalTabToolbarButton --variations-seed-version=20261030-090037.398000-production --pseudonymization-salt-handle=7?i?15516853701538085828?2985911167647596185?4 --trace-process-track-uuid=3190708988185955192",
+          "used_memory_mib": "181"
+        },
+        {
+          "pid": "820966",
+          "name": "/home/postedism/Desktop/ragged-mlir/.venv-pinned-cu132-20261023T025248Z/bin/python",
+          "used_memory_mib": "758"
+        }
+      ]
+    }
+  },
+  "measured_method_count": 2
+}
