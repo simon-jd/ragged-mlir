@@ -66,7 +66,8 @@ def draw(summary, output):
     axis.legend(loc="lower right", fontsize=8)
     axis.set_xlim(right=axis.get_xlim()[1] * 2.2)
     figure.tight_layout()
-    figure.savefig(output, metadata={"Date": None})
+    # No RDF block: no creator, date, format or type metadata in the file.
+    figure.savefig(output, metadata={"Creator": None, "Date": None, "Format": None, "Type": None})
 
 
 def main():
