@@ -28,7 +28,7 @@ from oracle import assert_matches, quantize_bf16
 
 ROOT = Path(__file__).resolve().parents[1]
 L2_MODES = ("warm", "cold", "both")
-METHODS = ("ragged-naive", "ragged-auto", "torch-segment", "njt-eager", "njt-compile", "cuda-naive", "cub", "triton", "fbgemm")
+METHODS = ("ragged-naive", "ragged-classified", "ragged-auto", "torch-segment", "njt-eager", "njt-compile", "cuda-naive", "cub", "triton", "fbgemm")
 
 
 class NotApplicable(Exception):
@@ -142,8 +142,10 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
         compiler = Compiler(args.compiler)
         optimizations = Optimizations(**{name: False for name in getattr(args, "disable_optimization", [])},
                                       feature_tile=getattr(args, "feature_tile", None))
+        # ragged-auto chooses a schedule per call from the cost model;
+        # ragged-classified is the same program with device classification forced.
         spec = ProgramSpec(args.op, args.dtype, args.d, args.offsets_dtype,
-                           strategy=method.removeprefix("ragged-"), scale=scale, mask=mask is not None,
+                           strategy="naive" if method == "ragged-naive" else "auto", scale=scale, mask=mask is not None,
                            optimizations=optimizations,
                            hints=Hints(**getattr(args, "length_bounds", {})))
         cache_path = destination / "cache" / method
@@ -165,11 +167,20 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
                     "compiler_sha256": program.artifact.key.compiler_sha256,
                     "toolchain": compiler.toolchain(), "spec": spec.to_dict(), "last_execution_report": None}
 
+        select = {"ragged-classified": "classified"}.get(method, "auto")
+        if select == "classified" and program.naive is None:
+            raise NotApplicable("the program does not classify on the device; ragged-auto is the same schedule")
+        # The longest segment length, the metadata NJT also receives; without
+        # it (--no-max-len) the program keeps device classification.
+        max_len = None if getattr(args, "no_max_len", False) else args.sequence_bounds["max_len"]
+        metadata["max_len_given"] = max_len is not None
+
         def call():
             # Caller output allocation is included, as for torch/NJT return values.
             out = torch.empty((rows, args.d), device=values.device, dtype=values.dtype)
             report = program.run(values, offsets, out, mask=mask,
-                                 concurrent=not getattr(args, "serial_classes", False))
+                                 concurrent=not getattr(args, "serial_classes", False),
+                                 select=select, max_len=max_len)
             metadata["_last_execution_report_object"] = report
             return out
         return call, metadata
@@ -371,10 +382,12 @@ def main():
     parser.add_argument("--mask", action="store_true", help="dense f32 additive softmax mask included in every method's complete call")
     parser.add_argument("--disable-optimization", action="append", default=[],
                         choices=("classification", "online_fusion", "warp_mapping", "split_mapping", "shuffle", "pointwise_fusion",
-                                 "row_pipelining"))
+                                 "row_pipelining", "vectorize"))
     parser.add_argument("--feature-tile", type=int, choices=(1, 2, 4, 8, 16, 32))
     parser.add_argument("--length-hints", action="store_true",
                         help="supply the workload's exact min/max segment lengths to ragged (NJT always gets them)")
+    parser.add_argument("--no-max-len", action="store_true",
+                        help="do not pass the longest segment length to ragged's per-call schedule choice")
     parser.add_argument("--serial-classes", action="store_true",
                         help="launch ragged's segment-class workers one after another on the caller's stream")
     parser.add_argument("--l2", choices=L2_MODES, default="warm",

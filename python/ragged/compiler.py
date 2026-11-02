@@ -4,7 +4,7 @@ No numerical interpreter is used as a fallback for missing LLVM/CUDA tools.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -121,13 +121,28 @@ class Compiler:
         return data
 
     def compile(self, spec: ProgramSpec, cache: ArtifactCache, *, llvm_commit: str | None = None,
-                ptxas_version: str | None = None, features: str = "+ptx80"):
+                ptxas_version: str | None = None, features: str = "+ptx80", adaptive: bool = True):
         """Compile a cubin and its ABI manifest, or validate an exact cache hit.
 
         Toolchain identities are probed from the actual compiler, including on
         cache hits. Optional caller identities are assertions, never provenance.
         A mismatched/corrupt entry is an error; only an absent entry recompiles.
+        With ``adaptive`` (the default), a program that classifies segments on
+        the device also gets its block-per-segment specialization, and runs
+        whichever ragged.selection predicts faster for each call.
         """
+        program = self._compile(spec, cache, llvm_commit=llvm_commit, ptxas_version=ptxas_version,
+                                features=features)
+        if not adaptive or not program.selects:
+            return program
+        naive = self._compile(replace(spec, strategy="naive"), cache, llvm_commit=llvm_commit,
+                              ptxas_version=ptxas_version, features=features)
+        from .runtime import CompiledProgram
+        return CompiledProgram(spec, program.artifact, cache_hit=program.cache_hit and naive.cache_hit,
+                               naive=naive)
+
+    def _compile(self, spec: ProgramSpec, cache: ArtifactCache, *, llvm_commit: str | None,
+                 ptxas_version: str | None, features: str):
         from .runtime import CompiledProgram
         compiler_sha256 = self._compiler_hash()
         actual = self.toolchain(chip=spec.chip, features=features)

@@ -105,9 +105,9 @@ def _optional_fault(monkeypatch, error):
     return fbgemm_reference
 
 
-def test_method_inventory_has_ten_unique_cells_and_optional_adapter_is_executable(tmp_path):
-    assert len(benchmark.METHODS) == len(set(benchmark.METHODS)) == 9
-    assert len(matrix.METHODS) == len(set(matrix.METHODS)) == 10
+def test_method_inventory_has_eleven_unique_cells_and_optional_adapter_is_executable(tmp_path):
+    assert len(benchmark.METHODS) == len(set(benchmark.METHODS)) == 10
+    assert len(matrix.METHODS) == len(set(matrix.METHODS)) == 11
     assert "fbgemm" in benchmark.METHODS and "fbgemm" in matrix.RUN_METHODS
     assert "fbgemm" not in matrix.PENDING_METHODS
     assert set(matrix.PENDING_METHODS) == {"sparse-gpu"}

@@ -4,7 +4,7 @@ from __future__ import annotations
 import atexit
 from collections import Counter
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import importlib
 import json
 import re
@@ -20,6 +20,7 @@ from .model import ExecutionReport, ProgramSpec, canonical_json
 from .optimizations import (Optimizations, class_fusion, computation_metadata, validate_optimization_metadata,
                             validate_optimization_spec)
 from .resources import resource_report, validate_resources_metadata, validate_resources_spec
+from .selection import default_model
 from .validation import raise_for_status, validate_validation_hints, validate_validation_metadata
 
 _module_lock = threading.RLock()
@@ -203,7 +204,8 @@ def _overlaps(left: Any, right: Any) -> bool:
 class CompiledProgram:
     ABI = "mlir-memref64-v1"
 
-    def __init__(self, spec: ProgramSpec, artifact: Artifact, *, cache_hit: bool = False):
+    def __init__(self, spec: ProgramSpec, artifact: Artifact, *, cache_hit: bool = False,
+                 naive: "CompiledProgram | None" = None):
         if artifact.key.ir_hash != spec.ir_hash:
             raise CacheMismatch("compiled program source does not match cached IR hash")
         for field in ("op", "dtype", "feature_dim", "offsets_dtype", "strategy", "chip"):
@@ -251,6 +253,35 @@ class CompiledProgram:
         self._concurrent_chains = tuple(sorted(self._schedule[1], key=lambda chain: _CLASS_ORDER.index(
             self._metadata["kernels"][chain[0]]["segment_class"])))
         self._layouts: dict[tuple[bool, int, int, int], Any] = {}
+        self._selects = (spec.strategy == "auto" and not spec.debug_visits
+                         and computation_metadata(self._metadata).get("dispatch_abi") == "classified-v3")
+        self._schedule_name = "classified" if self._selects else spec.strategy
+        if naive is not None and (not self.selects or naive.spec != replace(spec, strategy="naive")):
+            raise CacheMismatch("a block-per-segment companion must be the naive strategy of a classifying program")
+        # The block-per-segment schedule of the same source, chosen per call
+        # by the cost model (ragged.selection) when it predicts it faster.
+        self.naive = naive
+        self._choices: dict[tuple[int, int, int | None], tuple[str, dict[str, Any]]] = {}
+
+    @property
+    def selects(self) -> bool:
+        """Whether this program classifies on the device, so that one block
+        per segment is an alternative schedule worth choosing per call."""
+        return self._selects
+
+    def choose(self, n: int, b: int, max_len: int | None) -> tuple[str, dict[str, Any]]:
+        """The schedule run(select="auto") uses for this input and why."""
+        if self.naive is None:
+            return ("classified" if self.selects else self.spec.strategy), {}
+        key = (n, b, max_len)
+        choice = self._choices.get(key)
+        if choice is None:
+            if len(self._choices) >= 256:
+                self._choices.clear()
+            element = 2 if self.spec.dtype == "bf16" else 4
+            choice = self._choices[key] = default_model().choose(self.spec.op, n, b, self.spec.feature_dim,
+                                                                 element, max_len)
+        return choice
 
     def _layout(self, metadata: dict[str, Any], validation: bool, n: int, b: int,
                 device: int, workers: dict[str, int] | None = None):
@@ -605,7 +636,7 @@ class CompiledProgram:
 
     def run(self, values, offsets, out, stream=None, mode: str = "validated", *,
             debug_buffers: dict[str, Any] | None = None, mask=None,
-            concurrent: bool = True) -> ExecutionReport:
+            concurrent: bool = True, select: str = "auto", max_len: int | None = None) -> ExecutionReport:
         """Launch on the requested stream, optionally checking device offsets.
 
         Validated mode performs no device readback or host synchronization.
@@ -618,7 +649,37 @@ class CompiledProgram:
         With ``concurrent`` (the default), the worker chains of different
         segment classes run on separate streams between a fork after
         classification and a join on the execution stream.
+        A program compiled with a block-per-segment companion (``naive``)
+        chooses between the two schedules per call: ``select="auto"`` asks
+        the cost model, given the longest segment length ``max_len`` when the
+        caller knows it (a wrong value costs time, never correctness);
+        ``"classified"`` and ``"naive"`` force a schedule.
         """
+        if select not in ("auto", "classified", "naive"):
+            raise ValidationError("select must be auto, classified or naive")
+        if max_len is not None and (type(max_len) is not int or max_len < 0):
+            raise ValidationError("max_len must be None or a nonnegative int")
+        if select == "naive" and self.naive is None:
+            raise ValidationError("select=naive requires a program compiled with a block-per-segment companion")
+        if self.naive is not None and select != "classified":
+            if select == "naive":
+                chosen, selection = "naive", {"forced": True}
+            else:
+                try:
+                    n, b = int(values.shape[0]), int(offsets.numel()) - 1
+                except (AttributeError, IndexError, TypeError):
+                    n = b = None   # the classified path's validation reports it
+                chosen, selection = self.choose(n, b, max_len) if n is not None else ("classified", {})
+            if chosen == "naive":
+                return self.naive._run(values, offsets, out, stream, mode, debug_buffers=debug_buffers,
+                                       mask=mask, concurrent=concurrent, selected="naive", selection=selection)
+        else:
+            selection = {"forced": True} if self.naive is not None else {}
+        return self._run(values, offsets, out, stream, mode, debug_buffers=debug_buffers, mask=mask,
+                         concurrent=concurrent, selected=self._schedule_name, selection=selection)
+
+    def _run(self, values, offsets, out, stream, mode, *, debug_buffers, mask, concurrent,
+             selected: str, selection: dict[str, Any]) -> ExecutionReport:
         if mode not in ("validated", "checked"):
             raise ValidationError("mode must be validated or checked")
         if self.spec.mask != (mask is not None):
@@ -637,7 +698,7 @@ class CompiledProgram:
         if b == 0 and validation is None:
             return ExecutionReport((), tuple(metadata.get("thresholds", ())),
                                    (), 0, self._digest, metadata.get("fallback_reason"), mode, (),
-                                   (time.perf_counter() - started) * 1000, cache_hit=self.cache_hit,
+                                   (time.perf_counter() - started) * 1000, cache_hit=self.cache_hit, selected=selected, selection=selection,
                                    **self._report_fields)
         launched_names, launched_grids = [], []
         with torch.cuda.device(values.device):
@@ -702,7 +763,7 @@ class CompiledProgram:
                     return ExecutionReport((), tuple(metadata.get("thresholds", ())), tuple(launched_grids),
                                            validation_bytes, self._digest, metadata.get("fallback_reason"),
                                            mode, tuple(launched_names), (time.perf_counter() - started) * 1000,
-                                           cache_hit=self.cache_hit, validation_workspace_bytes=validation_bytes,
+                                           cache_hit=self.cache_hit, selected=selected, selection=selection, validation_workspace_bytes=validation_bytes,
                                            validation_host_ms=validation_host_ms,**self._report_fields)
             plan = self._plan(module_key, module, layouts, grids, n, b, concurrent)
             # The caching allocator's reuse safety is tied to the allocation
@@ -727,6 +788,6 @@ class CompiledProgram:
         return ExecutionReport(tuple(metadata.get("classes", ())), tuple(metadata.get("thresholds", ())),
                                tuple(launched_grids), workspace_bytes + validation_bytes, self._digest,
                                metadata.get("fallback_reason"), mode, tuple(launched_names),
-                               (time.perf_counter() - started) * 1000, cache_hit=self.cache_hit,
+                               (time.perf_counter() - started) * 1000, cache_hit=self.cache_hit, selected=selected, selection=selection,
                                validation_workspace_bytes=validation_bytes, validation_host_ms=validation_host_ms,
                                streams=plan.streams, **self._report_fields)

@@ -193,6 +193,10 @@ class ExecutionReport:
     # Streams the worker kernels ran on: the caller's plus one per additional
     # concurrently launched segment class.
     streams: int = 1
+    # The schedule that ran ("classified" or "naive" for an adaptive program)
+    # and the statistics and predictions that chose it (ragged.selection).
+    selected: str | None = None
+    selection: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

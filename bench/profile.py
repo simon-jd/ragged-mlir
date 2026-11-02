@@ -10,6 +10,10 @@ Run the calls under Nsight Systems, export its kernel trace, then summarize:
 
 The span of a call runs from its first kernel's start to its last kernel's
 end; with concurrent class chains it is shorter than the sum of kernel times.
+`--strategy naive` profiles the block-per-segment mode, `--strategy classified`
+forces device classification on an adaptive program, and `--l2 cold`
+overwrites a buffer of four times the L2 size before every call, as the
+benchmark's cold-L2 timing does.
 
 `python -m bench.profile host OUTPUT/case.npz --op sum` measures the host time
 of a call itself: the GPU is idle when each call starts, so a full launch
@@ -33,7 +37,8 @@ def load(args: argparse.Namespace):
     case = np.load(args.case)
     values = torch.from_numpy(case["values"]).cuda()
     offsets = torch.from_numpy(case["offsets"]).cuda()
-    spec = ProgramSpec(args.op, "f32", values.shape[1], "i64")
+    spec = ProgramSpec(args.op, "f32", values.shape[1], "i64",
+                       strategy="naive" if args.strategy == "naive" else "auto")
     program = Compiler(args.compiler).compile(spec, ArtifactCache(tempfile.mkdtemp()))
     rows = values.shape[0] if args.op == "softmax" else offsets.numel() - 1
     return torch, program, values, offsets, torch.empty((rows, values.shape[1]), device="cuda")
@@ -41,12 +46,22 @@ def load(args: argparse.Namespace):
 
 def run(args: argparse.Namespace) -> None:
     torch, program, values, offsets, out = load(args)
+    options = {"concurrent": not args.serial_classes}
+    if args.strategy == "classified":
+        options["select"] = "classified"
+    flush = None
+    if args.l2 == "cold":
+        l2_bytes = torch.cuda.get_device_properties(0).L2_cache_size
+        flush = torch.empty((4 * l2_bytes,), dtype=torch.uint8, device="cuda")
     for _ in range(5):
-        program.run(values, offsets, out, concurrent=not args.serial_classes)
+        program.run(values, offsets, out, **options)
     torch.cuda.synchronize()
     torch.cuda.cudart().cudaProfilerStart()
     for _ in range(args.calls):
-        program.run(values, offsets, out, concurrent=not args.serial_classes)
+        if flush is not None:
+            flush.zero_()
+        torch.cuda.synchronize()
+        program.run(values, offsets, out, **options)
     torch.cuda.synchronize()
     torch.cuda.cudart().cudaProfilerStop()
 
@@ -54,12 +69,13 @@ def run(args: argparse.Namespace) -> None:
 def host(args: argparse.Namespace) -> None:
     import time
     torch, program, values, offsets, out = load(args)
+    options = {"select": "classified"} if args.strategy == "classified" else {}
     for concurrent in (True, False):
         samples = []
         for _ in range(100 + args.calls):
             torch.cuda.synchronize()
             start = time.perf_counter()
-            program.run(values, offsets, out, concurrent=concurrent)
+            program.run(values, offsets, out, concurrent=concurrent, **options)
             samples.append((time.perf_counter() - start) * 1e6)
         print(f"classes {'concurrent' if concurrent else 'serial'}: median host time per call "
               f"{statistics.median(samples[100:]):.1f} us over {args.calls} calls")
@@ -73,9 +89,10 @@ def summarize(args: argparse.Namespace) -> None:
                      for row in csv.DictReader(lines[header:]) if row["Name"].startswith("ragged_"))
     calls: list[list[tuple[int, int, str]]] = []
     for kernel in kernels:
-        # Each call begins with init on the caller's stream after the previous
-        # call's join, so init separates calls.
-        if kernel[2].endswith("_init") or not calls:
+        # Each call begins with the same kernel on the caller's stream (init
+        # when classifying) after the previous call's join, so its first
+        # kernel separates calls.
+        if not calls or kernel[2] == kernels[0][2]:
             calls.append([])
         calls[-1].append(kernel)
     durations = defaultdict(list)
@@ -100,12 +117,15 @@ def main() -> None:
     runner.add_argument("--compiler", default="build/bin/ragged-compile")
     runner.add_argument("--calls", type=int, default=20)
     runner.add_argument("--serial-classes", action="store_true")
+    runner.add_argument("--strategy", choices=("auto", "classified", "naive"), default="auto")
+    runner.add_argument("--l2", choices=("warm", "cold"), default="warm")
     runner.set_defaults(handler=run)
     timer = commands.add_parser("host", help="host time per call, each call starting on an idle GPU")
     timer.add_argument("case", help="a benchmark case.npz")
     timer.add_argument("--op", choices=("sum", "max", "softmax"), required=True)
     timer.add_argument("--compiler", default="build/bin/ragged-compile")
     timer.add_argument("--calls", type=int, default=1000)
+    timer.add_argument("--strategy", choices=("auto", "classified", "naive"), default="auto")
     timer.set_defaults(handler=host)
     summary = commands.add_parser("summarize", help="summarize an nsys cuda_gpu_trace CSV")
     summary.add_argument("trace")

@@ -82,9 +82,10 @@ def test_vector_access_is_bitwise_identical_to_one_feature_per_thread(gpu_enviro
     torch, compile_spec, _, _ = gpu_environment
     spec = ProgramSpec(op, "f32", d, alias=alias, strategy=strategy)
     values, offsets, device_values, device_offsets = device_case(torch, spec, LENGTHS, 97 + d)
-    vector, report = run(torch, compile_spec(spec), device_values, device_offsets)
+    select = "classified" if strategy == "auto" else "auto"
+    vector, report = run(torch, compile_spec(spec), device_values, device_offsets, select=select)
     scalar, scalar_report = run(torch, compile_spec(replace(spec, optimizations=Optimizations(
-        vectorize=False, feature_tile=8))), device_values, device_offsets)
+        vectorize=False, feature_tile=8))), device_values, device_offsets, select=select)
     assert (report.d_tile, report.d_vector, scalar_report.d_tile, scalar_report.d_vector) == (8, 4, 8, 1)
     assert report.optimizations["effective"]["vectorize"] is True
     assert report.grids[-1][1] * 4 == scalar_report.grids[-1][1] == d // 8
@@ -100,9 +101,9 @@ def test_every_vector_width_matches_the_oracle(gpu_environment, op, dtype, d):
     spec = ProgramSpec(op, dtype, d)
     values, offsets, device_values, device_offsets = device_case(torch, spec, LENGTHS[:16], 5 + d)
     width = max(w for w in (1, 2, 4, 8) if d % w == 0 and w * (2 if dtype == "bf16" else 4) <= 16)
-    for strategy in ("auto", "naive"):
-        output, report = run(torch, compile_spec(replace(spec, strategy=strategy)), device_values, device_offsets)
-        assert report.d_vector == width
+    for select in ("classified", "naive"):
+        output, report = run(torch, compile_spec(spec), device_values, device_offsets, select=select)
+        assert report.d_vector == width and report.selected == select
         assert_matches(output.float().cpu().numpy(), values, offsets, operation=op, input_dtype=dtype)
 
 

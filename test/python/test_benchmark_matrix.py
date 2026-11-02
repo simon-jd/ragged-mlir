@@ -56,7 +56,7 @@ def test_full_plan_covers_every_requested_axis_and_never_probes_gpu(tmp_path):
         raise AssertionError("plan-only must not probe GPU or execute child benchmarks")
     report, code = matrix.run_matrix(args, preflight_fn=forbidden, runner=forbidden)
     assert code == 0 and report["status"] == report["scope"] == "planned"
-    assert report["case_count"] == 960 and report["method_cell_count"] == 9600
+    assert report["case_count"] == 960 and report["method_cell_count"] == 10560
     expected = set(itertools.product(("sum", "max", "softmax"), ("f32", "bf16"), (1, 16, 128, 1024),
         ("i32", "i64"), (*matrix.DISTRIBUTIONS, "public_histogram"), matrix.NORMALIZATIONS, ("small", "large")))
     assert {(case["op"], case["dtype"], case["D"], case["offsets_dtype"], case["distribution"],

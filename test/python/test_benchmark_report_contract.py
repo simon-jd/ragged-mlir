@@ -487,6 +487,7 @@ def test_ragged_complete_call_keeps_runtime_work_but_not_evidence_serialization_
 
     class Program:
         cache_hit = False
+        naive = None
         artifact = SimpleNamespace(key=SimpleNamespace(digest="fixture", compiler_sha256="0" * 64))
 
         def run(self, *args, **kwargs):
@@ -509,7 +510,8 @@ def test_ragged_complete_call_keeps_runtime_work_but_not_evidence_serialization_
         return object()
 
     monkeypatch.setattr(ragged, "Compiler", Compiler)
-    args = SimpleNamespace(compiler="synthetic", op="sum", dtype="f32", d=16, offsets_dtype="i64", scale=1.0)
+    args = SimpleNamespace(compiler="synthetic", op="sum", dtype="f32", d=16, offsets_dtype="i64", scale=1.0,
+                           sequence_bounds={"min_len": 1, "max_len": 3})
     values = SimpleNamespace(shape=(4, 16), dtype="synthetic-f32", device="synthetic-device")
     offsets = SimpleNamespace(numel=lambda: 3)
     call, _ = make_call("ragged-auto", args, SimpleNamespace(empty=empty), values, offsets, tmp_path)
