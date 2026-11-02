@@ -21,17 +21,17 @@ def controlled_program(options=None, *, base=None, scale=0.5):
                              ptxas_version=base.artifact.key.ptxas_version,compiler_sha256=base.artifact.key.compiler_sha256)
     metadata = deepcopy(base.artifact.metadata)
     materialized = not options.pointwise_fusion and (spec.mask or scale != 1)
-    tile = options.resolved_tile(spec.feature_dim)
-    metadata.update(d_tile=tile,pointwise_materialized=materialized)
+    tile, vector = options.geometry(spec.feature_dim, spec.dtype, spec.smem_per_cta)
+    metadata.update(d_tile=tile,d_vector=vector,pointwise_materialized=materialized)
     metadata["optimizations"] = {"requested":options.to_dict(),"effective":{
         "classification":metadata.get("dispatch_abi") == "classified-v3",
         "online_fusion":metadata.get("fusion") == "online", "warp_mapping":"warp" in metadata["classes"],
         "split_mapping":"split" in metadata["classes"], "shuffle":"warp" in metadata["classes"] and options.shuffle,
         "pointwise_fusion":options.pointwise_fusion and (spec.mask or scale != 1),
-        "row_pipelining":options.row_pipelining}}
+        "row_pipelining":options.row_pipelining,"vectorize":vector > 1}}
     for index,kernel in enumerate(metadata["kernels"]):
         if metadata.get("dispatch_abi") != "classified-v3" or index >= 2:
-            kernel["grid"][1] = (spec.feature_dim + tile - 1)//tile
+            kernel["grid"][1] = -(-spec.feature_dim//(tile*vector))
     if materialized:
         metadata["workspace"].append({"name":"logits","dtype":"f32","shape":["N",spec.feature_dim]})
         for kernel in metadata["kernels"]:

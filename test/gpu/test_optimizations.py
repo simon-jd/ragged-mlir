@@ -12,7 +12,7 @@ from ragged import Hints, Optimizations, ProgramSpec, ValidationError
 from test_correctness import gpu_environment, prepared
 
 FLAGS = ("classification", "online_fusion", "warp_mapping", "split_mapping", "shuffle", "pointwise_fusion",
-         "row_pipelining")
+         "row_pipelining", "vectorize")
 
 
 def offsets_for(lengths):

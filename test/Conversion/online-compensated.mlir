@@ -22,6 +22,6 @@
 // CHECK: arith.constant 0x7FC00000 : f32
 // CHECK: scf.yield {{.*}} : f32, f32, f32
 func.func @softmax(%v: memref<?x128xf32>, %o: memref<?xi64>, %r: memref<?x128xf32>) {
-  ragged.segment_softmax %v, %o into %r {min_len = 33 : i64, max_len = 4096 : i64, force_fusion = true} : memref<?x128xf32>, memref<?xi64>, memref<?x128xf32>
+  ragged.segment_softmax %v, %o into %r {min_len = 33 : i64, max_len = 4096 : i64, force_fusion = true, vectorize = false} : memref<?x128xf32>, memref<?xi64>, memref<?x128xf32>
   return
 }

@@ -396,10 +396,12 @@ int main(int argc, char **argv) {
   Attribute validationManifest = module->getOperation()->getAttr("ragged.validation");
   Attribute optimizationManifest = module->getOperation()->getAttr("ragged.optimizations");
   Attribute resolvedTile = module->getOperation()->getAttr("ragged.d_tile");
+  Attribute resolvedVector = module->getOperation()->getAttr("ragged.d_vector");
   Attribute materializedPointwise = module->getOperation()->getAttr("ragged.pointwise_materialized");
   if (explain && optimizationManifest) {
     llvm::errs() << "ragged-controls: " << llvm::formatv("{0}", attrToJSON(optimizationManifest))
                  << "; d_tile=" << cast<IntegerAttr>(resolvedTile).getInt()
+                 << "; d_vector=" << cast<IntegerAttr>(resolvedVector).getInt()
                  << "; pointwise_materialized=" << (cast<BoolAttr>(materializedPointwise).getValue() ? "true" : "false") << "\n";
   }
   auto dispatchABI = module->getOperation()->getAttrOfType<StringAttr>("ragged.dispatch_abi");
@@ -451,7 +453,7 @@ int main(int argc, char **argv) {
       {"mask", additiveMask},
       {"resources", std::move(resources)},
       {"optimizations", attrToJSON(optimizationManifest)},
-      {"d_tile", attrToJSON(resolvedTile)}, {"pointwise_materialized", attrToJSON(materializedPointwise)},
+      {"d_tile", attrToJSON(resolvedTile)}, {"d_vector", attrToJSON(resolvedVector)}, {"pointwise_materialized", attrToJSON(materializedPointwise)},
       {"validation", attrToJSON(validationManifest)},
       {"kernels", attrToJSON(kernelManifest)}, {"classes", std::move(classes)},
       {"thresholds", std::move(thresholds)},

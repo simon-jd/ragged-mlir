@@ -16,6 +16,6 @@
 // CHECK: arith.maximumf
 // CHECK: gpu.barrier
 func.func @softmax(%v: memref<?x128xf32>, %o: memref<?xi64>) {
-  ragged.segment_softmax %v, %o into %v {strategy = "naive"} : memref<?x128xf32>, memref<?xi64>, memref<?x128xf32>
+  ragged.segment_softmax %v, %o into %v {strategy = "naive", vectorize = false} : memref<?x128xf32>, memref<?xi64>, memref<?x128xf32>
   return
 }

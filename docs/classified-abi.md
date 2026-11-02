@@ -93,8 +93,9 @@ vocabulary; none is executable text:
 | `ceil_B_128` | `(B // 128) + (B % 128 != 0)` |
 | `min_B_resident` | `min(B, W)`, where `W` is the kernel's device worker count below |
 
-`ceil(D/d_tile)` is emitted as a concrete integer. The default tile is the next
-power of two of D capped at 32; `feature_tile` can override it. Validated B=0
+`ceil(D/(d_tile*d_vector))` is emitted as a concrete integer. The default tile is
+`min(32, next power of two of D) / d_vector` threads; `feature_tile` can override
+it ([optimizations.md](optimizations.md)). Validated B=0
 requires N=0 and returns with no allocations or launches. Checked B=0 first
 runs the separate offsets validation. Otherwise the prologue runs on the
 caller's stream, preceded by optional materialization:
@@ -105,7 +106,7 @@ caller's stream, preceded by optional materialization:
 3. The worker chain of each active class: warp kernels, CTA kernels and split
    kernels, each chain in manifest order, as below.
 
-Worker grid x is `"min_B_resident"`, grid y is `ceil(D/d_tile)`. A worker CTA loops
+Worker grid x is `"min_B_resident"`, grid y is `ceil(D/(d_tile*d_vector))`. A worker CTA loops
 over queue positions starting at block x and advancing by grid x, stopping at
 the device counter for its class. All threads in the CTA follow the same queue
 loop and finish with a uniform barrier before the next queue entry can reuse

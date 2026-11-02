@@ -6,6 +6,7 @@
 #include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -28,6 +29,11 @@ Value fp(OpBuilder &b, Location loc, float value) {
 bool enabled(Operation *op, StringRef name) {
   auto attr = op->getAttrOfType<BoolAttr>(name);
   return !attr || attr.getValue();
+}
+// Features per thread and row access, from ragged-plan; 1 when absent.
+int64_t vectorWidth(Operation *dispatch) {
+  auto attr = dispatch->getAttrOfType<IntegerAttr>("d_vector");
+  return attr ? attr.getInt() : 1;
 }
 bool hasPointwise(MapSegmentsOp map) {
   auto scale = map->getAttrOfType<FloatAttr>("scale");
@@ -110,16 +116,20 @@ DictionaryAttr emitMaterialize(OpBuilder &b, gpu::GPUModuleOp gpuModule,
 
 // The baseline maps one CTA to one (segment, feature tile). Every barrier is
 // reached by every CTA thread, including threads in a partial feature tile.
+// A thread owns `vec` adjacent features of each row it visits: one vector
+// load or store per row when vec > 1, and every per-feature fold, tree and
+// store in the same order as with one feature per thread.
 class CTAEmitter {
 public:
+  using Lanes = SmallVector<Value, 8>;
   CTAEmitter(OpBuilder &builder, MapSegmentsOp source, int64_t threads,
-             int64_t tile, ValueRange args, Value shared,
+             int64_t tile, int64_t vec, ValueRange args, Value shared,
              Value segmentOverride = {}, Value maximumStats = {},
              Value totalStats = {}, Value partialBuffer = {},
              Value partId = {}, bool useShuffle = false, Value mask = {}, Value logits = {},
              Value partialSumBuffer = {}, Value partialIndex = {})
       : b(builder), loc(source.getLoc()), source(source), threads(threads),
-        tile(tile), useShuffle(useShuffle), values(args[0]), offsets(args[1]),
+        tile(tile), vec(vec), useShuffle(useShuffle), values(args[0]), offsets(args[1]),
         out(args[2]), shared(shared), maxStats(maximumStats), sumStats(totalStats),
         partials(partialBuffer), partialSums(partialSumBuffer), part(partId), mask(mask), logits(logits) {
     zero = index(b, loc, 0); one = index(b, loc, 1);
@@ -132,12 +142,14 @@ public:
     Value tileValue = index(b, loc, tile);
     featureLane = b.create<arith::RemUIOp>(loc, tid, tileValue);
     rowLane = b.create<arith::DivUIOp>(loc, tid, tileValue);
-    feature = b.create<arith::AddIOp>(loc, featureLane,
+    Value lane = b.create<arith::AddIOp>(loc, featureLane,
         b.create<arith::MulIOp>(loc, dBlock, tileValue));
+    feature = vec == 1 ? lane : Value(b.create<arith::MulIOp>(loc, lane, index(b, loc, vec)));
     int64_t d = cast<MemRefType>(values.getType()).getDimSize(1);
     // When the tile divides D every launched feature tile is full, so the
-    // guard is a constant and loads need no branch around them.
-    validFeature = d % tile == 0 ? Value(b.create<arith::ConstantIntOp>(loc, 1, 1))
+    // guard is a constant and loads need no branch around them. vec divides
+    // D, so a thread's features are all valid or all past the end.
+    validFeature = d % (tile * vec) == 0 ? Value(b.create<arith::ConstantIntOp>(loc, 1, 1))
         : Value(b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult, feature, index(b, loc, d)));
     unroll = enabled(source, "row_pipelining") ? kRowUnroll : 1;
     Value next = b.create<arith::AddIOp>(loc, segment, one);
@@ -169,9 +181,7 @@ public:
     if (phase == "partial_online") {
       // A split part's reference and mass, merged by combine_online.
       auto stats = onlineStatistics();
-      int64_t d = cast<MemRefType>(values.getType()).getDimSize(1);
-      Value column = b.create<arith::AddIOp>(loc, feature,
-          b.create<arith::MulIOp>(loc, part, index(b, loc, d)));
+      Value column = partColumn(part);
       storeLeader(stats.first, partials, false, column, partialRow);
       storeLeader(stats.second, partialSums, false, column, partialRow);
     } else if (phase == "combine_online") {
@@ -180,19 +190,15 @@ public:
       combinePartials(phase.drop_front(8));
     } else if (phase.starts_with("partial_")) {
       StringRef kind = phase.drop_front(8);
-      Value maximum = kind == "exp_sum" ? loadStat(maxStats) : Value();
-      Value result = reduce(kind, maximum);
-      int64_t d = cast<MemRefType>(values.getType()).getDimSize(1);
-      Value column = b.create<arith::AddIOp>(loc, feature,
-          b.create<arith::MulIOp>(loc, part, index(b, loc, d)));
-      storeLeader(result, partials, false, column, partialRow);
+      Lanes maximum = kind == "exp_sum" ? loadStat(maxStats) : Lanes();
+      Lanes result = reduce(kind, maximum);
+      storeLeader(result, partials, false, partColumn(part), partialRow);
     } else if (phase == "sum" || phase == "max") {
-      Value result = reduce(phase, Value());
-      storeLeader(result, out, true);
+      storeLeader(reduce(phase, {}), out, true);
     } else if (phase == "max_stats") {
-      storeLeader(reduce("max", Value()), maxStats, false);
+      storeLeader(reduce("max", {}), maxStats, false);
     } else if (phase == "sum_stats") {
-      Value maximum = loadStat(maxStats);
+      Lanes maximum = loadStat(maxStats);
       storeLeader(reduce("exp_sum", maximum), sumStats, false);
     } else if (phase == "normalize") {
       normalize(loadStat(maxStats), loadStat(sumStats));
@@ -200,10 +206,10 @@ public:
       auto stats = onlineStatistics();
       normalize(stats.first, stats.second);
     } else if (phase == "softmax") {
-      Value maximum = reduce("max", Value());
+      Lanes maximum = reduce("max", {});
       // All consumers finish the max read before shared storage is reused.
       b.create<gpu::BarrierOp>(loc);
-      Value total = reduce("exp_sum", maximum);
+      Lanes total = reduce("exp_sum", maximum);
       normalize(maximum, total);
     }
   }
@@ -211,18 +217,62 @@ public:
 private:
   static constexpr int64_t kRowUnroll = 8;
 
+  // The vec features at (row, column): one aligned vector access when vec > 1.
+  // vec divides D and the runtime requires every tensor base to be aligned
+  // to the access, so each vector is aligned to its own size (at most 16 B).
+  int64_t alignment(Value memref) const {
+    int64_t bytes = cast<MemRefType>(memref.getType()).getElementTypeBitWidth() / 8;
+    return std::min<int64_t>(16, vec * bytes);
+  }
+  Lanes loadLanes(Value memref, Value row, Value column) {
+    if (vec == 1) return {b.create<memref::LoadOp>(loc, memref, ValueRange{row, column})};
+    auto type = VectorType::get({vec}, cast<MemRefType>(memref.getType()).getElementType());
+    Value loaded = b.create<vector::LoadOp>(loc, type, memref, ValueRange{row, column}, false,
+                                            llvm::MaybeAlign(alignment(memref)));
+    Lanes lanes;
+    for (int64_t v = 0; v < vec; ++v) lanes.push_back(b.create<vector::ExtractOp>(loc, loaded, v));
+    return lanes;
+  }
+  void storeLanes(ArrayRef<Value> lanes, Value memref, Value row, Value column) {
+    if (vec == 1) {
+      b.create<memref::StoreOp>(loc, lanes[0], memref, ValueRange{row, column});
+      return;
+    }
+    auto type = VectorType::get({vec}, cast<MemRefType>(memref.getType()).getElementType());
+    Value packed = b.create<vector::FromElementsOp>(loc, type, lanes);
+    b.create<vector::StoreOp>(loc, packed, memref, ValueRange{row, column}, false,
+                              llvm::MaybeAlign(alignment(memref)));
+  }
+  template <typename Fn>
+  Lanes chooseLanes(Value cond, Value otherwise, Fn body) {
+    SmallVector<Type> types(vec, otherwise.getType());
+    auto ifOp = b.create<scf::IfOp>(loc, TypeRange(types), cond, true);
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPointToStart(&ifOp.getThenRegion().front());
+    Lanes taken = body();
+    b.create<scf::YieldOp>(loc, ValueRange(taken));
+    b.setInsertionPointToStart(&ifOp.getElseRegion().front());
+    b.create<scf::YieldOp>(loc, ValueRange(SmallVector<Value>(vec, otherwise)));
+    return Lanes(ifOp.getResults().begin(), ifOp.getResults().end());
+  }
+  Value partColumn(Value p) {
+    int64_t d = cast<MemRefType>(values.getType()).getDimSize(1);
+    return b.create<arith::AddIOp>(loc, feature, b.create<arith::MulIOp>(loc, p, index(b, loc, d)));
+  }
+
   // A lane visits rows firstRow, firstRow + rowStep, ... below end. Each
   // main-loop iteration issues `unroll` loads before folding them in visit
   // order, so the arithmetic is that of the rolled loop while several loads
   // are in flight per lane; a rolled loop covers the last count % unroll rows.
-  SmallVector<Value> forRows(ValueRange initial, function_ref<Value(Value)> fetch,
-                             function_ref<SmallVector<Value>(ValueRange, Value, Value)> fold) {
+  SmallVector<Value> forRows(ValueRange initial, function_ref<Lanes(Value)> fetch,
+                             function_ref<SmallVector<Value>(ValueRange, ArrayRef<Value>, Value)> fold) {
     int64_t step = threads / tile;
     auto body = [&](int64_t width) {
       return [&, width](OpBuilder &nested, Location at, Value row, ValueRange iter) {
         OpBuilder::InsertionGuard guard(b);
         b.setInsertionPoint(nested.getInsertionBlock(), nested.getInsertionPoint());
-        SmallVector<Value> rows{row}, fetched;
+        SmallVector<Value> rows{row};
+        SmallVector<Lanes> fetched;
         for (int64_t k = 1; k < width; ++k)
           rows.push_back(b.create<arith::AddIOp>(loc, row, index(b, loc, k * step)));
         for (Value r : rows) fetched.push_back(fetch(r));
@@ -254,6 +304,17 @@ private:
     Value correction = b.create<arith::SelectOp>(loc, finite, rawError, fp(b, loc, 0.0f));
     return {next, correction};
   }
+  // A loop over the eight split parts carrying `width` values per feature.
+  SmallVector<Value> overParts(int64_t width, Value initial,
+                               function_ref<SmallVector<Value>(ValueRange, Value)> fold) {
+    SmallVector<Value> init(vec * width, initial);
+    return b.create<scf::ForOp>(loc, zero, index(b, loc, 8), one, init,
+      [&](OpBuilder &nested, Location at, Value p, ValueRange iter) {
+        OpBuilder::InsertionGuard guard(b);
+        b.setInsertionPoint(nested.getInsertionBlock(), nested.getInsertionPoint());
+        b.create<scf::YieldOp>(loc, fold(iter, partColumn(p)));
+      }).getResults();
+  }
   void combinePartials(StringRef phase) {
     bool maximum = phase == "max" || phase == "max_stats";
     bool stats = phase.ends_with("_stats");
@@ -262,27 +323,28 @@ private:
     Value active = b.create<arith::AndIOp>(loc, leader, validFeature);
     when(b, loc, active, [&] {
       Value identity = fp(b, loc, maximum ? -std::numeric_limits<float>::infinity() : 0.0f);
-      SmallVector<Value> initial{identity};
-      if (!maximum) initial.push_back(identity);
-      int64_t d = cast<MemRefType>(values.getType()).getDimSize(1);
-      auto loop = b.create<scf::ForOp>(loc, zero, index(b, loc, 8), one, initial,
-        [&](OpBuilder &nested, Location at, Value p, ValueRange iter) {
-          OpBuilder::InsertionGuard guard(b);
-          b.setInsertionPoint(nested.getInsertionBlock(), nested.getInsertionPoint());
-          Value column = b.create<arith::AddIOp>(loc, feature,
-              b.create<arith::MulIOp>(loc, p, index(b, loc, d)));
-          Value value = b.create<memref::LoadOp>(loc, partials, ValueRange{partialRow, column});
+      int64_t width = maximum ? 1 : 2;
+      auto loop = overParts(width, identity, [&](ValueRange iter, Value column) -> SmallVector<Value> {
+        Lanes value = loadLanes(partials, partialRow, column);
+        SmallVector<Value> next;
+        for (int64_t v = 0; v < vec; ++v) {
           if (maximum) {
-            b.create<scf::YieldOp>(loc, b.create<arith::MaximumFOp>(loc, iter[0], value).getResult());
+            next.push_back(b.create<arith::MaximumFOp>(loc, iter[v], value[v]));
           } else {
-            auto result = compensatedAdd(iter[0], iter[1], value);
-            b.create<scf::YieldOp>(loc, ValueRange{result.first, result.second});
+            auto result = compensatedAdd(iter[2 * v], iter[2 * v + 1], value[v]);
+            next.append({result.first, result.second});
           }
-        });
-      Value result = loop.getResult(0);
+        }
+        return next;
+      });
       Type dtype = cast<MemRefType>(destination.getType()).getElementType();
-      if (!dtype.isF32()) result = b.create<arith::TruncFOp>(loc, dtype, result);
-      b.create<memref::StoreOp>(loc, result, destination, ValueRange{segment, feature});
+      Lanes result;
+      for (int64_t v = 0; v < vec; ++v) {
+        Value value = loop[width * v];
+        if (!dtype.isF32()) value = b.create<arith::TruncFOp>(loc, dtype, value);
+        result.push_back(value);
+      }
+      storeLanes(result, destination, segment, feature);
     });
   }
   // Merge the eight parts' (reference, mass) pairs: the largest reference
@@ -293,45 +355,52 @@ private:
     Value leader = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rowLane, zero);
     Value active = b.create<arith::AndIOp>(loc, leader, validFeature);
     when(b, loc, active, [&] {
-      int64_t d = cast<MemRefType>(values.getType()).getDimSize(1);
       Value minusInf = fp(b, loc, -std::numeric_limits<float>::infinity());
       Value zeroFloat = fp(b, loc, 0.0f);
-      auto column = [&](Value p) {
-        return b.create<arith::AddIOp>(loc, feature, b.create<arith::MulIOp>(loc, p, index(b, loc, d)));
-      };
-      auto overParts = [&](ValueRange initial, function_ref<SmallVector<Value>(ValueRange, Value)> fold) {
-        return b.create<scf::ForOp>(loc, zero, index(b, loc, 8), one, initial,
-          [&](OpBuilder &nested, Location at, Value p, ValueRange iter) {
-            OpBuilder::InsertionGuard guard(b);
-            b.setInsertionPoint(nested.getInsertionBlock(), nested.getInsertionPoint());
-            b.create<scf::YieldOp>(loc, fold(iter, column(p)));
-          }).getResults();
-      };
-      Value reference = overParts(ValueRange{minusInf}, [&](ValueRange iter, Value at) -> SmallVector<Value> {
-        Value partReference = b.create<memref::LoadOp>(loc, partials, ValueRange{partialRow, at});
-        return {b.create<arith::MaximumFOp>(loc, iter[0], partReference)};
-      })[0];
-      Value total = overParts(ValueRange{zeroFloat, zeroFloat}, [&](ValueRange iter, Value at) -> SmallVector<Value> {
-        Value partReference = b.create<memref::LoadOp>(loc, partials, ValueRange{partialRow, at});
-        Value mass = b.create<memref::LoadOp>(loc, partialSums, ValueRange{partialRow, at});
-        Value scaled = b.create<arith::MulFOp>(loc, mass, b.create<math::ExpOp>(loc,
-            b.create<arith::SubFOp>(loc, partReference, reference)));
-        Value empty = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, partReference, minusInf);
-        auto sum = compensatedAdd(iter[0], iter[1], b.create<arith::SelectOp>(loc, empty, zeroFloat, scaled));
-        return {sum.first, sum.second};
-      })[0];
-      Value positiveInfinity = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
-          reference, fp(b, loc, std::numeric_limits<float>::infinity()));
-      total = b.create<arith::SelectOp>(loc, positiveInfinity,
-          fp(b, loc, std::numeric_limits<float>::quiet_NaN()), total);
-      b.create<memref::StoreOp>(loc, reference, maxStats, ValueRange{segment, feature});
-      b.create<memref::StoreOp>(loc, total, sumStats, ValueRange{segment, feature});
+      auto reference = overParts(1, minusInf, [&](ValueRange iter, Value at) -> SmallVector<Value> {
+        Lanes partReference = loadLanes(partials, partialRow, at);
+        SmallVector<Value> next;
+        for (int64_t v = 0; v < vec; ++v)
+          next.push_back(b.create<arith::MaximumFOp>(loc, iter[v], partReference[v]));
+        return next;
+      });
+      auto total = overParts(2, zeroFloat, [&](ValueRange iter, Value at) -> SmallVector<Value> {
+        Lanes partReference = loadLanes(partials, partialRow, at);
+        Lanes mass = loadLanes(partialSums, partialRow, at);
+        SmallVector<Value> next;
+        for (int64_t v = 0; v < vec; ++v) {
+          Value scaled = b.create<arith::MulFOp>(loc, mass[v], b.create<math::ExpOp>(loc,
+              b.create<arith::SubFOp>(loc, partReference[v], reference[v])));
+          Value empty = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, partReference[v], minusInf);
+          auto sum = compensatedAdd(iter[2 * v], iter[2 * v + 1],
+                                    b.create<arith::SelectOp>(loc, empty, zeroFloat, scaled));
+          next.append({sum.first, sum.second});
+        }
+        return next;
+      });
+      Lanes references(reference.begin(), reference.end()), totals;
+      for (int64_t v = 0; v < vec; ++v) {
+        Value positiveInfinity = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+            reference[v], fp(b, loc, std::numeric_limits<float>::infinity()));
+        totals.push_back(b.create<arith::SelectOp>(loc, positiveInfinity,
+            fp(b, loc, std::numeric_limits<float>::quiet_NaN()), total[2 * v]));
+      }
+      storeLanes(references, maxStats, segment, feature);
+      storeLanes(totals, sumStats, segment, feature);
     });
   }
   Value broadcastWarp(Value value) {
     Value lane = b.create<arith::IndexCastOp>(loc, b.getI32Type(), featureLane);
     Value width = b.create<arith::ConstantIntOp>(loc, 32, 32);
     return b.create<gpu::ShuffleOp>(loc, value, lane, width, gpu::ShuffleMode::IDX).getShuffleResult();
+  }
+  Value shuffleDown(Value value, int64_t distance) {
+    return b.create<gpu::ShuffleOp>(loc, value, static_cast<int32_t>(distance * tile), 32,
+                                    gpu::ShuffleMode::DOWN).getShuffleResult();
+  }
+  // Shared tree slot of feature v of statistic s for thread `at`.
+  Value slot(int64_t s, int64_t v, Value at) {
+    return b.create<arith::AddIOp>(loc, at, index(b, loc, (s * vec + v) * threads));
   }
   std::pair<Value, Value> mergeStatistics(Value leftMax, Value leftSum,
                                         Value rightMax, Value rightSum) {
@@ -356,181 +425,227 @@ private:
         fp(b, loc, std::numeric_limits<float>::quiet_NaN()), mergedSum);
     return {mergedMax, mergedSum};
   }
-  std::pair<Value, Value> onlineStatistics() {
+  std::pair<Lanes, Lanes> onlineStatistics() {
     Value minusInf = fp(b, loc, -std::numeric_limits<float>::infinity());
     Value zeroFloat = fp(b, loc, 0.0f);
     Value oneFloat = fp(b, loc, 1.0f);
-    auto loop = forRows(ValueRange{minusInf, zeroFloat, zeroFloat},
-      [&](Value row) { return choose(b, loc, validFeature, minusInf, [&] { return loadInput(row); }); },
-      [&](ValueRange iter, Value x, Value) -> SmallVector<Value> {
-        // Keep a stable exponential reference instead of rescaling at every
-        // new maximum. Repeated, nearly-unit exp(oldMax-newMax) factors lose
-        // accuracy even with compensated addition. A reference may lag the
-        // maximum by at most one: individual masses are bounded by exp(1),
-        // and every actual rescaling damps earlier rounding errors by < 1/e.
-        Value maximum = b.create<arith::MaximumFOp>(loc, iter[0], x);
-        Value empty = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, iter[0], minusInf);
-        Value advance = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OGT,
-            b.create<arith::SubFOp>(loc, maximum, iter[0]), oneFloat);
-        Value unordered = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNO, iter[0], x);
-        Value recenter = b.create<arith::OrIOp>(loc, empty,
-            b.create<arith::OrIOp>(loc, advance, unordered));
-        Value anchor = b.create<arith::SelectOp>(loc, recenter, maximum, iter[0]);
-        Value scale = b.create<math::ExpOp>(loc,
-            b.create<arith::SubFOp>(loc, iter[0], anchor));
-        Value total = b.create<arith::SelectOp>(loc, empty, zeroFloat,
-            b.create<arith::MulFOp>(loc, iter[1], scale));
-        Value error = b.create<arith::SelectOp>(loc, empty, zeroFloat,
-            b.create<arith::MulFOp>(loc, iter[2], scale));
-        Value absent = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, x, minusInf);
-        Value mass = b.create<arith::SelectOp>(loc, absent, zeroFloat,
-            b.create<math::ExpOp>(loc, b.create<arith::SubFOp>(loc, x, anchor)));
-        auto accumulated = compensatedAdd(total, error, mass);
-        Value positiveInfinity = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
-            anchor, fp(b, loc, std::numeric_limits<float>::infinity()));
-        total = b.create<arith::SelectOp>(loc, positiveInfinity,
-            fp(b, loc, std::numeric_limits<float>::quiet_NaN()), accumulated.first);
-        error = b.create<arith::SelectOp>(loc, positiveInfinity, zeroFloat, accumulated.second);
-        return {anchor, total, error};
+    SmallVector<Value> initial;
+    for (int64_t v = 0; v < vec; ++v) initial.append({minusInf, zeroFloat, zeroFloat});
+    auto loop = forRows(initial,
+      [&](Value row) { return chooseLanes(validFeature, minusInf, [&] { return loadInput(row); }); },
+      [&](ValueRange iter, ArrayRef<Value> lanes, Value) -> SmallVector<Value> {
+        SmallVector<Value> next;
+        for (int64_t v = 0; v < vec; ++v) {
+          Value reference = iter[3 * v], sum = iter[3 * v + 1], carried = iter[3 * v + 2], x = lanes[v];
+          // Keep a stable exponential reference instead of rescaling at every
+          // new maximum. Repeated, nearly-unit exp(oldMax-newMax) factors lose
+          // accuracy even with compensated addition. A reference may lag the
+          // maximum by at most one: individual masses are bounded by exp(1),
+          // and every actual rescaling damps earlier rounding errors by < 1/e.
+          Value maximum = b.create<arith::MaximumFOp>(loc, reference, x);
+          Value empty = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, reference, minusInf);
+          Value advance = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OGT,
+              b.create<arith::SubFOp>(loc, maximum, reference), oneFloat);
+          Value unordered = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::UNO, reference, x);
+          Value recenter = b.create<arith::OrIOp>(loc, empty,
+              b.create<arith::OrIOp>(loc, advance, unordered));
+          Value anchor = b.create<arith::SelectOp>(loc, recenter, maximum, reference);
+          Value scale = b.create<math::ExpOp>(loc,
+              b.create<arith::SubFOp>(loc, reference, anchor));
+          Value total = b.create<arith::SelectOp>(loc, empty, zeroFloat,
+              b.create<arith::MulFOp>(loc, sum, scale));
+          Value error = b.create<arith::SelectOp>(loc, empty, zeroFloat,
+              b.create<arith::MulFOp>(loc, carried, scale));
+          Value absent = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ, x, minusInf);
+          Value mass = b.create<arith::SelectOp>(loc, absent, zeroFloat,
+              b.create<math::ExpOp>(loc, b.create<arith::SubFOp>(loc, x, anchor)));
+          auto accumulated = compensatedAdd(total, error, mass);
+          Value positiveInfinity = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OEQ,
+              anchor, fp(b, loc, std::numeric_limits<float>::infinity()));
+          total = b.create<arith::SelectOp>(loc, positiveInfinity,
+              fp(b, loc, std::numeric_limits<float>::quiet_NaN()), accumulated.first);
+          error = b.create<arith::SelectOp>(loc, positiveInfinity, zeroFloat, accumulated.second);
+          next.append({anchor, total, error});
+        }
+        return next;
       });
+    Lanes maximum, total;
+    for (int64_t v = 0; v < vec; ++v) {
+      maximum.push_back(loop[3 * v]);
+      total.push_back(loop[3 * v + 1]);
+    }
     if (useShuffle) {
-      Value maximum = loop[0], total = loop[1];
       for (int64_t distance = (threads / tile) / 2; distance > 0; distance /= 2) {
-        Value otherMax = b.create<gpu::ShuffleOp>(loc, maximum,
-            static_cast<int32_t>(distance * tile), 32, gpu::ShuffleMode::DOWN).getShuffleResult();
-        Value otherSum = b.create<gpu::ShuffleOp>(loc, total,
-            static_cast<int32_t>(distance * tile), 32, gpu::ShuffleMode::DOWN).getShuffleResult();
         Value active = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult,
                                             rowLane, index(b, loc, distance));
-        auto merged = mergeStatistics(maximum, total, otherMax, otherSum);
-        maximum = b.create<arith::SelectOp>(loc, active, merged.first, maximum);
-        total = b.create<arith::SelectOp>(loc, active, merged.second, total);
+        for (int64_t v = 0; v < vec; ++v) {
+          Value otherMax = shuffleDown(maximum[v], distance);
+          Value otherSum = shuffleDown(total[v], distance);
+          auto merged = mergeStatistics(maximum[v], total[v], otherMax, otherSum);
+          maximum[v] = b.create<arith::SelectOp>(loc, active, merged.first, maximum[v]);
+          total[v] = b.create<arith::SelectOp>(loc, active, merged.second, total[v]);
+        }
       }
-      return {broadcastWarp(maximum), broadcastWarp(total)};
+      for (int64_t v = 0; v < vec; ++v) {
+        maximum[v] = broadcastWarp(maximum[v]);
+        total[v] = broadcastWarp(total[v]);
+      }
+      return {maximum, total};
     }
-    Value sumIndex = b.create<arith::AddIOp>(loc, tid, index(b, loc, threads));
-    b.create<memref::StoreOp>(loc, loop[0], shared, ValueRange{tid});
-    b.create<memref::StoreOp>(loc, loop[1], shared, ValueRange{sumIndex});
+    for (int64_t v = 0; v < vec; ++v) {
+      b.create<memref::StoreOp>(loc, maximum[v], shared, ValueRange{slot(0, v, tid)});
+      b.create<memref::StoreOp>(loc, total[v], shared, ValueRange{slot(1, v, tid)});
+    }
     b.create<gpu::BarrierOp>(loc);
     for (int64_t distance = (threads / tile) / 2; distance > 0; distance /= 2) {
       Value active = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult,
                                           rowLane, index(b, loc, distance));
       when(b, loc, active, [&] {
         Value other = b.create<arith::AddIOp>(loc, tid, index(b, loc, distance * tile));
-        Value otherSum = b.create<arith::AddIOp>(loc, other, index(b, loc, threads));
-        Value lhsM = b.create<memref::LoadOp>(loc, shared, ValueRange{tid});
-        Value lhsS = b.create<memref::LoadOp>(loc, shared, ValueRange{sumIndex});
-        Value rhsM = b.create<memref::LoadOp>(loc, shared, ValueRange{other});
-        Value rhsS = b.create<memref::LoadOp>(loc, shared, ValueRange{otherSum});
-        auto merged = mergeStatistics(lhsM, lhsS, rhsM, rhsS);
-        b.create<memref::StoreOp>(loc, merged.first, shared, ValueRange{tid});
-        b.create<memref::StoreOp>(loc, merged.second, shared, ValueRange{sumIndex});
+        for (int64_t v = 0; v < vec; ++v) {
+          Value lhsM = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(0, v, tid)});
+          Value lhsS = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(1, v, tid)});
+          Value rhsM = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(0, v, other)});
+          Value rhsS = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(1, v, other)});
+          auto merged = mergeStatistics(lhsM, lhsS, rhsM, rhsS);
+          b.create<memref::StoreOp>(loc, merged.first, shared, ValueRange{slot(0, v, tid)});
+          b.create<memref::StoreOp>(loc, merged.second, shared, ValueRange{slot(1, v, tid)});
+        }
       });
       b.create<gpu::BarrierOp>(loc);
     }
-    Value leaderSum = b.create<arith::AddIOp>(loc, featureLane, index(b, loc, threads));
-    return {b.create<memref::LoadOp>(loc, shared, ValueRange{featureLane}),
-            b.create<memref::LoadOp>(loc, shared, ValueRange{leaderSum})};
+    for (int64_t v = 0; v < vec; ++v) {
+      maximum[v] = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(0, v, featureLane)});
+      total[v] = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(1, v, featureLane)});
+    }
+    return {maximum, total};
   }
-  Value loadInput(Value row) {
-    if (logits) return b.create<memref::LoadOp>(loc, logits, ValueRange{row, feature});
-    return transformedInput(b, source, values, mask, row, feature);
+  Lanes loadInput(Value row) {
+    if (logits) return loadLanes(logits, row, feature);
+    // The same per-feature arithmetic as transformedInput.
+    Lanes x = loadLanes(values, row, feature);
+    auto scale = source->getAttrOfType<FloatAttr>("scale");
+    for (Value &value : x) {
+      if (!value.getType().isF32()) value = b.create<arith::ExtFOp>(loc, b.getF32Type(), value);
+      if (scale) value = b.create<arith::MulFOp>(loc, value, fp(b, loc, scale.getValueAsDouble()));
+    }
+    if (mask) {
+      Lanes bias = loadLanes(mask, row, feature);
+      for (int64_t v = 0; v < vec; ++v) x[v] = b.create<arith::AddFOp>(loc, x[v], bias[v]);
+    }
+    return x;
   }
-  Value loadStat(Value buffer) {
-    return choose(b, loc, validFeature, fp(b, loc, 0), [&] {
-      return Value(b.create<memref::LoadOp>(loc, buffer, ValueRange{segment, feature}));
-    });
+  Lanes loadStat(Value buffer) {
+    return chooseLanes(validFeature, fp(b, loc, 0), [&] { return loadLanes(buffer, segment, feature); });
   }
   Value combine(StringRef kind, Value lhs, Value rhs) {
     if (kind == "max") return b.create<arith::MaximumFOp>(loc, lhs, rhs);
     return b.create<arith::AddFOp>(loc, lhs, rhs);
   }
-  Value reduce(StringRef kind, Value maximum) {
+  Lanes reduce(StringRef kind, ArrayRef<Value> maximum) {
     Value identity = fp(b, loc, kind == "max" ? -std::numeric_limits<float>::infinity() : 0.0f);
     // A lane may visit thousands of rows before the CTA tree. Ordinary serial
     // f32 addition can exceed the shared oracle tolerance even for repeated
     // 0.1 inputs, so carry the rounding error through the lane traversal.
     bool compensated = kind != "max";
-    SmallVector<Value> initial{identity};
-    Value positiveInfinity;
-    if (compensated) {
-      initial.push_back(identity);
-      positiveInfinity = fp(b, loc, std::numeric_limits<float>::infinity());
-    }
-    auto loop = forRows(initial,
+    int64_t width = compensated ? 2 : 1;
+    Value positiveInfinity = fp(b, loc, std::numeric_limits<float>::infinity());
+    auto loop = forRows(SmallVector<Value>(vec * width, identity),
       [&](Value row) {
-        return choose(b, loc, validFeature, identity, [&] {
-          Value x = loadInput(row);
-          if (kind == "exp_sum") {
-            x = b.create<arith::SubFOp>(loc, x, maximum);
-            x = b.create<math::ExpOp>(loc, x);
-          }
+        return chooseLanes(validFeature, identity, [&] {
+          Lanes x = loadInput(row);
+          if (kind == "exp_sum")
+            for (int64_t v = 0; v < vec; ++v)
+              x[v] = b.create<math::ExpOp>(loc, b.create<arith::SubFOp>(loc, x[v], maximum[v]));
           return x;
         });
       },
-      [&](ValueRange iter, Value value, Value) -> SmallVector<Value> {
-        if (!compensated) return {combine(kind, iter[0], value)};
-        Value corrected = b.create<arith::SubFOp>(loc, value, iter[1]);
-        Value total = b.create<arith::AddFOp>(loc, iter[0], corrected);
-        Value roundedIncrement = b.create<arith::SubFOp>(loc, total, iter[0]);
-        Value error = b.create<arith::SubFOp>(loc, roundedIncrement, corrected);
-        Value magnitude = b.create<math::AbsFOp>(loc, total);
-        Value finite = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OLT,
-                                             magnitude, positiveInfinity);
-        // inf - inf in the compensation expression is NaN. Clearing the
-        // correction for non-finite totals preserves +inf + finite = +inf,
-        // while +inf + -inf and NaN inputs still poison the total itself.
-        Value compensation = b.create<arith::SelectOp>(loc, finite, error, identity);
-        return {total, compensation};
+      [&](ValueRange iter, ArrayRef<Value> lanes, Value) -> SmallVector<Value> {
+        SmallVector<Value> next;
+        for (int64_t v = 0; v < vec; ++v) {
+          if (!compensated) {
+            next.push_back(combine(kind, iter[v], lanes[v]));
+            continue;
+          }
+          Value sum = iter[2 * v], carried = iter[2 * v + 1];
+          Value corrected = b.create<arith::SubFOp>(loc, lanes[v], carried);
+          Value total = b.create<arith::AddFOp>(loc, sum, corrected);
+          Value roundedIncrement = b.create<arith::SubFOp>(loc, total, sum);
+          Value error = b.create<arith::SubFOp>(loc, roundedIncrement, corrected);
+          Value magnitude = b.create<math::AbsFOp>(loc, total);
+          Value finite = b.create<arith::CmpFOp>(loc, arith::CmpFPredicate::OLT,
+                                               magnitude, positiveInfinity);
+          // inf - inf in the compensation expression is NaN. Clearing the
+          // correction for non-finite totals preserves +inf + finite = +inf,
+          // while +inf + -inf and NaN inputs still poison the total itself.
+          Value compensation = b.create<arith::SelectOp>(loc, finite, error, identity);
+          next.append({total, compensation});
+        }
+        return next;
       });
+    Lanes result;
+    for (int64_t v = 0; v < vec; ++v) result.push_back(loop[width * v]);
     if (useShuffle) {
-      Value result = loop[0];
       for (int64_t distance = (threads / tile) / 2; distance > 0; distance /= 2) {
-        Value other = b.create<gpu::ShuffleOp>(loc, result,
-            static_cast<int32_t>(distance * tile), 32, gpu::ShuffleMode::DOWN).getShuffleResult();
         Value active = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult,
                                             rowLane, index(b, loc, distance));
-        result = b.create<arith::SelectOp>(loc, active, combine(kind, result, other), result);
+        for (int64_t v = 0; v < vec; ++v) {
+          Value other = shuffleDown(result[v], distance);
+          result[v] = b.create<arith::SelectOp>(loc, active, combine(kind, result[v], other), result[v]);
+        }
       }
-      return broadcastWarp(result);
+      for (int64_t v = 0; v < vec; ++v) result[v] = broadcastWarp(result[v]);
+      return result;
     }
-    b.create<memref::StoreOp>(loc, loop[0], shared, ValueRange{tid});
+    for (int64_t v = 0; v < vec; ++v)
+      b.create<memref::StoreOp>(loc, result[v], shared, ValueRange{slot(0, v, tid)});
     b.create<gpu::BarrierOp>(loc);
     for (int64_t distance = (threads / tile) / 2; distance > 0; distance /= 2) {
       Value active = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::ult,
                                           rowLane, index(b, loc, distance));
       when(b, loc, active, [&] {
         Value other = b.create<arith::AddIOp>(loc, tid, index(b, loc, distance * tile));
-        Value lhs = b.create<memref::LoadOp>(loc, shared, ValueRange{tid});
-        Value rhs = b.create<memref::LoadOp>(loc, shared, ValueRange{other});
-        b.create<memref::StoreOp>(loc, combine(kind, lhs, rhs), shared, ValueRange{tid});
+        for (int64_t v = 0; v < vec; ++v) {
+          Value lhs = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(0, v, tid)});
+          Value rhs = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(0, v, other)});
+          b.create<memref::StoreOp>(loc, combine(kind, lhs, rhs), shared, ValueRange{slot(0, v, tid)});
+        }
       });
       b.create<gpu::BarrierOp>(loc);
     }
-    return b.create<memref::LoadOp>(loc, shared, ValueRange{featureLane});
+    for (int64_t v = 0; v < vec; ++v)
+      result[v] = b.create<memref::LoadOp>(loc, shared, ValueRange{slot(0, v, featureLane)});
+    return result;
   }
-  void storeLeader(Value result, Value buffer, bool castOutput, Value column = {}, Value row = {}) {
+  void storeLeader(ArrayRef<Value> result, Value buffer, bool castOutput, Value column = {}, Value row = {}) {
     Value leader = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rowLane, zero);
     Value active = b.create<arith::AndIOp>(loc, leader, validFeature);
     when(b, loc, active, [&] {
-      if (castOutput && !cast<MemRefType>(out.getType()).getElementType().isF32())
-        result = b.create<arith::TruncFOp>(loc, cast<MemRefType>(out.getType()).getElementType(), result);
-      b.create<memref::StoreOp>(loc, result, buffer, ValueRange{row ? row : segment, column ? column : feature});
+      Lanes stored(result.begin(), result.end());
+      Type dtype = cast<MemRefType>(buffer.getType()).getElementType();
+      if (castOutput && !dtype.isF32())
+        for (Value &value : stored) value = b.create<arith::TruncFOp>(loc, dtype, value);
+      storeLanes(stored, buffer, row ? row : segment, column ? column : feature);
     });
   }
-  void normalize(Value maximum, Value total) {
+  void normalize(ArrayRef<Value> maximum, ArrayRef<Value> total) {
     // Every element is read and then written by the same lane, so loading
     // later rows before storing earlier ones keeps in-place softmax exact.
+    Lanes maxima(maximum.begin(), maximum.end()), totals(total.begin(), total.end());
     forRows(ValueRange{},
-      [&](Value row) { return choose(b, loc, validFeature, fp(b, loc, 0), [&] { return loadInput(row); }); },
-      [&](ValueRange, Value input, Value row) -> SmallVector<Value> {
+      [&](Value row) { return chooseLanes(validFeature, fp(b, loc, 0), [&] { return loadInput(row); }); },
+      [&](ValueRange, ArrayRef<Value> input, Value row) -> SmallVector<Value> {
         when(b, loc, validFeature, [&] {
-          Value value = b.create<arith::SubFOp>(loc, input, maximum);
-          value = b.create<math::ExpOp>(loc, value);
-          value = b.create<arith::DivFOp>(loc, value, total);
           Type dtype = cast<MemRefType>(out.getType()).getElementType();
-          if (!dtype.isF32()) value = b.create<arith::TruncFOp>(loc, dtype, value);
-          b.create<memref::StoreOp>(loc, value, out, ValueRange{row, feature});
+          Lanes normalized;
+          for (int64_t v = 0; v < vec; ++v) {
+            Value value = b.create<arith::SubFOp>(loc, input[v], maxima[v]);
+            value = b.create<math::ExpOp>(loc, value);
+            value = b.create<arith::DivFOp>(loc, value, totals[v]);
+            if (!dtype.isF32()) value = b.create<arith::TruncFOp>(loc, dtype, value);
+            normalized.push_back(value);
+          }
+          storeLanes(normalized, out, row, feature);
         });
         return {};
       });
@@ -538,7 +653,7 @@ private:
   OpBuilder &b;
   Location loc;
   MapSegmentsOp source;
-  int64_t threads, tile, unroll;
+  int64_t threads, tile, vec, unroll;
   bool useShuffle;
   Value values, offsets, out, shared, maxStats, sumStats, partials, partialSums, part, mask, logits;
   Value partialRow;
@@ -560,6 +675,7 @@ public:
     loc = map.getLoc();
     d = cast<MemRefType>(map.getValues().getType()).getDimSize(1);
     tile = dispatch->getAttrOfType<IntegerAttr>("d_tile").getInt();
+    vec = vectorWidth(dispatch);
     operation = str(map, "operation");
     auto debug = map->getAttrOfType<BoolAttr>("debug_visits");
     debugVisits = debug && debug.getValue();
@@ -657,7 +773,7 @@ private:
     bool splitRange = segmentClass == "split" &&
                       (phase.starts_with("partial_") || phase == "normalize");
     int64_t shared = (segmentClass == "warp" && enabled(map, "shuffle")) || phase.starts_with("combine_") || phase == "normalize"
-        ? 0 : threads * (phase == "online" || phase == "partial_online" ? 2 : 1);
+        ? 0 : threads * vec * (phase == "online" || phase == "partial_online" ? 2 : 1);
     std::string role = (segmentClass + "_" + phase).str();
     emitKernel(role, segmentClass, phase, threads, splitRange ? 8 : 1, shared);
   }
@@ -692,7 +808,7 @@ private:
       b.getNamedAttr("name", b.getStringAttr(name)),
       b.getNamedAttr("role", b.getStringAttr(role)),
       b.getNamedAttr("grid", b.getArrayAttr({gridX,
-          b.getI64IntegerAttr(segmentClass.empty() ? 1 : (d + tile - 1) / tile),
+          b.getI64IntegerAttr(segmentClass.empty() ? 1 : (d + tile * vec - 1) / (tile * vec)),
           b.getI64IntegerAttr(parts)})),
       b.getNamedAttr("block", b.getDenseI64ArrayAttr({threads, 1, 1})),
       b.getNamedAttr("args", b.getArrayAttr(names)),
@@ -813,7 +929,7 @@ private:
         Value segment = b.create<memref::LoadOp>(loc, argument("segment_ids"), ValueRange{queue, position});
         segment = b.create<arith::IndexCastOp>(loc, b.getIndexType(), segment);
         Value part = parts == 8 ? Value(b.create<gpu::BlockIdOp>(loc, gpu::Dimension::z)) : Value();
-        CTAEmitter emitter(b, map, threads, tile, function.getArguments().take_front(3), shared,
+        CTAEmitter emitter(b, map, threads, tile, vec, function.getArguments().take_front(3), shared,
                            segment, argument("max_stats"), argument("sum_stats"),
                            argument("partials"), part, segmentClass == "warp" && enabled(map, "shuffle"),
                            map.getMask() ? Value(function.getArgument(3)) : Value(), argument("logits"),
@@ -848,7 +964,7 @@ private:
   MapSegmentsOp map;
   Location loc;
   unsigned id;
-  int64_t d, tile;
+  int64_t d, tile, vec;
   StringRef operation;
   bool debugVisits, hasSplit;
   SmallVector<StringRef> classes;
@@ -993,7 +1109,8 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
   StringRef getDescription() const final { return "Generate sm_89 GPU kernels with uniform CTA reductions"; }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, func::FuncDialect, gpu::GPUDialect,
-                    math::MathDialect, memref::MemRefDialect, scf::SCFDialect>();
+                    math::MathDialect, memref::MemRefDialect, scf::SCFDialect,
+                    vector::VectorDialect>();
   }
   void runOnOperation() override {
     ModuleOp module = getOperation();
@@ -1044,7 +1161,7 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
       bool materialized = materializesPointwise(map);
       SmallVector<NamedAttribute> requested;
       for (StringRef name : {"classification", "online_fusion", "warp_mapping", "split_mapping", "shuffle", "pointwise_fusion",
-                              "row_pipelining"})
+                              "row_pipelining", "vectorize"})
         requested.push_back(b.getNamedAttr(name, b.getBoolAttr(enabled(map, name))));
       requested.push_back(b.getNamedAttr("feature_tile", map->hasAttr("feature_tile") ? map->getAttr("feature_tile") : b.getUnitAttr()));
       auto effective = b.getDictionaryAttr({
@@ -1054,10 +1171,12 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
           b.getNamedAttr("split_mapping", b.getBoolAttr(hasSplit)),
           b.getNamedAttr("shuffle", b.getBoolAttr(hasWarp && enabled(map, "shuffle"))),
           b.getNamedAttr("pointwise_fusion", b.getBoolAttr(hasPointwise(map) && !materialized)),
-          b.getNamedAttr("row_pipelining", b.getBoolAttr(enabled(map, "row_pipelining")))});
+          b.getNamedAttr("row_pipelining", b.getBoolAttr(enabled(map, "row_pipelining"))),
+          b.getNamedAttr("vectorize", b.getBoolAttr(vectorWidth(dispatch) > 1))});
       module->setAttr("ragged.optimizations", b.getDictionaryAttr({
           b.getNamedAttr("requested", b.getDictionaryAttr(requested)), b.getNamedAttr("effective", effective)}));
       module->setAttr("ragged.d_tile", dispatch->getAttr("d_tile"));
+      module->setAttr("ragged.d_vector", b.getI64IntegerAttr(vectorWidth(dispatch)));
       module->setAttr("ragged.pointwise_materialized", b.getBoolAttr(materialized));
       if (classified) {
         ClassifiedEmitter emitter(b, gpuModule, dispatch, dispatchId, manifest);
@@ -1072,6 +1191,7 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
         continue;
       }
       int64_t tile = cast<IntegerAttr>(dispatch->getAttr("d_tile")).getInt();
+      int64_t vec = vectorWidth(dispatch);
       int64_t threads = cast<IntegerAttr>(dispatch->getAttr("threads")).getInt();
       int64_t d = cast<MemRefType>(map.getValues().getType()).getDimSize(1);
       StringRef operation = str(map, "operation");
@@ -1105,7 +1225,7 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
         auto function = b.create<gpu::GPUFuncOp>(map.getLoc(), name, b.getFunctionType(types, {}));
         function.setKernelAttr(b.getUnitAttr());
         auto space = gpu::AddressSpaceAttr::get(b.getContext(), gpu::AddressSpace::Workgroup);
-        int64_t sharedElements = phase == "normalize" || useShuffle ? 0 : online ? threads * 2 : threads;
+        int64_t sharedElements = phase == "normalize" || useShuffle ? 0 : (online ? threads * 2 : threads) * vec;
         Value shared;
         if (sharedElements) {
           auto sharedType = MemRefType::get({sharedElements}, b.getF32Type(), MemRefLayoutAttrInterface{}, space);
@@ -1117,13 +1237,13 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
         Value sumStats = separateStats ? Value(function.getArgument(sourceArguments + 1)) : Value();
         Value mask = map.getMask() ? Value(function.getArgument(3)) : Value();
         Value logits = materialized ? Value(function.getArgument(logitsIndex)) : Value();
-        CTAEmitter emitter(b, map, threads, tile, function.getArguments().take_front(3), shared,
+        CTAEmitter emitter(b, map, threads, tile, vec, function.getArguments().take_front(3), shared,
                            {}, maxStats, sumStats, {}, {}, useShuffle, mask, logits);
         emitter.emit(phase);
         b.create<gpu::ReturnOp>(map.getLoc());
         SmallVector<NamedAttribute> fields{
           b.getNamedAttr("name", b.getStringAttr(name)),
-          b.getNamedAttr("grid", b.getArrayAttr({b.getStringAttr("B"), b.getI64IntegerAttr((d + tile - 1) / tile), b.getI64IntegerAttr(1)})),
+          b.getNamedAttr("grid", b.getArrayAttr({b.getStringAttr("B"), b.getI64IntegerAttr((d + tile * vec - 1) / (tile * vec)), b.getI64IntegerAttr(1)})),
           b.getNamedAttr("block", b.getDenseI64ArrayAttr({threads, 1, 1})),
           b.getNamedAttr("args", b.getArrayAttr(names)),
           b.getNamedAttr("shared_bytes", b.getI64IntegerAttr(0)),

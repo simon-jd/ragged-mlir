@@ -93,10 +93,23 @@ struct PlanPass : PassWrapper<PlanPass, OperationPass<ModuleOp>> {
         signalPassFailure(); return;
       }
       int64_t d = cast<MemRefType>(map.getValues().getType()).getDimSize(1);
-      // A power-of-two feature tile keeps reduction groups aligned at warp boundaries.
-      int64_t tile = 1;
-      while (tile < d && tile < 32) tile *= 2;
-      tile = intAttr(map, "feature_tile", tile);
+      // Each thread owns `vec` adjacent features, read and written with one
+      // access of at most 16 bytes; vec divides D so no vector straddles the
+      // end of a row. An explicit feature tile keeps one feature per thread.
+      int64_t elementBytes = cast<MemRefType>(map.getValues().getType()).getElementTypeBitWidth() / 8;
+      int64_t vec = 1;
+      if (boolAttr(map, "vectorize", true) && !map->hasAttr("feature_tile"))
+        // The block tree keeps one f32 per thread and feature in shared memory.
+        while (2 * vec * elementBytes <= 16 && d % (2 * vec) == 0 &&
+               128 * 2 * vec * 4 <= intAttr(map, "smem_per_cta", 49152)) vec *= 2;
+      // A power-of-two feature tile keeps reduction groups aligned at warp
+      // boundaries. A tile spans the next power of two of D, at most 32
+      // features, with or without vectors: d_tile = features / vec threads
+      // cover it, so wider accesses add row lanes rather than removing tiles.
+      int64_t features = 1;
+      while (features < d && features < 32) features *= 2;
+      vec = std::min(vec, features);
+      int64_t tile = intAttr(map, "feature_tile", features / vec);
       int64_t max = intAttr(map, "max_len", -1);
       int64_t min = intAttr(map, "min_len", 0);
       bool naive = stringAttr(map, "strategy", "auto") == "naive";
@@ -126,9 +139,10 @@ struct PlanPass : PassWrapper<PlanPass, OperationPass<ModuleOp>> {
       state.addAttribute("chip", b.getStringAttr(chip));
       state.addAttribute("reason", b.getStringAttr(reason));
       state.addAttribute("d_tile", b.getI64IntegerAttr(tile));
+      state.addAttribute("d_vector", b.getI64IntegerAttr(vec));
       int64_t threads = classes.size() == 1 && cast<StringAttr>(classes.front()).getValue() == "warp" ? 32 : 128;
       state.addAttribute("threads", b.getI64IntegerAttr(threads));
-      state.addAttribute("shared_bytes", b.getI64IntegerAttr(threads == 32 && boolAttr(map, "shuffle", true) ? 0 : threads * 4));
+      state.addAttribute("shared_bytes", b.getI64IntegerAttr(threads == 32 && boolAttr(map, "shuffle", true) ? 0 : threads * vec * 4));
       state.addRegion();
       auto dispatch = cast<DispatchOp>(b.create(state));
       auto *body = new Block();
@@ -142,6 +156,7 @@ struct PlanPass : PassWrapper<PlanPass, OperationPass<ModuleOp>> {
       }
       map->moveBefore(body, body->end());
       map->setAttr("d_tile", b.getI64IntegerAttr(tile));
+      map->setAttr("d_vector", b.getI64IntegerAttr(vec));
       map->setAttr("mapping", classes.size() == 1 ? classes.front() : b.getStringAttr("classified"));
       b.setInsertionPointToEnd(body);
       b.create<YieldOp>(map.getLoc());
@@ -178,9 +193,10 @@ struct FusePass : PassWrapper<FusePass, OperationPass<ModuleOp>> {
       int64_t sharedBytes = 0;
       for (Attribute attr : classes) {
         StringRef segmentClass = cast<StringAttr>(attr).getValue();
-        // One f32 reference and one f32 mass per thread for the block tree.
+        // One f32 reference and one f32 mass per thread and feature for the block tree.
+        int64_t vec = intAttr(map, "d_vector", 1);
         int64_t classBytes = segmentClass == "warp" && boolAttr(map, "shuffle", true)
-            ? 0 : (segmentClass == "warp" ? 32 : 128) * 2 * 4;
+            ? 0 : (segmentClass == "warp" ? 32 : 128) * vec * 2 * 4;
         StringRef reason;
         if (!onlineEnabled) reason = "online statistics fusion disabled";
         else if (alias) reason = "in-place output requires kernel-separated read and write phases";

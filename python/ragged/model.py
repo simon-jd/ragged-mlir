@@ -185,6 +185,7 @@ class ExecutionReport:
     validation_host_ms: float | None = None
     optimizations: dict[str, Any] | None = None
     d_tile: int | None = None
+    d_vector: int = 1
     pointwise_materialized: bool = False
     # Actual ptxas evidence for the compiled artifact, including entries that
     # may not launch in this invocation. None means legacy/unmeasured metadata.

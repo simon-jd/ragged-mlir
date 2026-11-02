@@ -12,7 +12,7 @@ from ragged import Artifact, CacheKey, CacheMismatch, CompiledProgram, Optimizat
 from ragged.layout import resolve_layout
 
 FLAGS = ("classification", "online_fusion", "warp_mapping", "split_mapping", "shuffle", "pointwise_fusion",
-         "row_pipelining")
+         "row_pipelining", "vectorize")
 
 
 def manifest(spec=None):
@@ -20,7 +20,7 @@ def manifest(spec=None):
                               optimizations=Optimizations(pointwise_fusion=False, feature_tile=2))
     key = CacheKey.from_spec(spec, llvm_commit="independent-contract", ptxas_version="independent-contract",
                              compiler_sha256="8" * 64)
-    tile = spec.optimizations.feature_tile or min(32, 1 << (spec.feature_dim - 1).bit_length())
+    tile, vector = spec.optimizations.geometry(spec.feature_dim, spec.dtype, spec.smem_per_cta)
     pointwise = spec.mask or spec.scale != 1
     materialized = pointwise and not spec.optimizations.pointwise_fusion
     workspace = [{"name": name, "dtype": "f32", "shape": ["B", spec.feature_dim]}
@@ -29,17 +29,18 @@ def manifest(spec=None):
         workspace.append({"name": "logits", "dtype": "f32", "shape": ["N", spec.feature_dim]})
     args = ["values", "offsets", "out"] + (["mask"] if spec.mask else []) + [w["name"] for w in workspace]
     kernels = [{"name": name, "args": list(args), "block": [128, 1, 1],
-                "grid": ["B", (spec.feature_dim + tile - 1) // tile, 1]}
+                "grid": ["B", -(-spec.feature_dim // (tile * vector)), 1]}
                for name in ("review_max", "review_sum", "review_normalize")]
     if materialized:
         kernels.insert(0, {"name": "review_materialize", "role": "materialize", "args": list(args),
                            "block": [128, 1, 1], "grid": [256, 1, 1], "static_shared_bytes": 0})
     metadata = {"schema": 1, "abi": "mlir-memref64-v1", "classes": ["cta"], "mask": spec.mask,
                 "fusion": "three_pass", "alias_safe": True, "workspace": workspace, "kernels": kernels,
-                "d_tile": tile, "pointwise_materialized": materialized,
+                "d_tile": tile, "d_vector": vector, "pointwise_materialized": materialized,
                 "optimizations": {"requested": spec.optimizations.to_dict(),
                                   "effective": {name: pointwise and not materialized if name == "pointwise_fusion"
                                                 else spec.optimizations.row_pipelining if name == "row_pipelining"
+                                                else vector > 1 if name == "vectorize"
                                                 else False for name in FLAGS}},
                 "compiler_sha256": key.compiler_sha256,
                 "toolchain": {name: getattr(key, name) for name in
@@ -197,7 +198,7 @@ def test_worker_geometry_covers_exact_feature_tiles(d, tile):
 def test_legacy_manifest_is_allowed_only_for_default_requests():
     for options in (Optimizations(), Optimizations(shuffle=False)):
         spec, key, metadata = manifest(ProgramSpec("softmax", feature_dim=7, strategy="naive", optimizations=options))
-        for field in ("optimizations", "d_tile", "pointwise_materialized"):
+        for field in ("optimizations", "d_tile", "d_vector", "pointwise_materialized"):
             metadata.pop(field)
         if options == Optimizations():
             construct(spec, key, metadata)

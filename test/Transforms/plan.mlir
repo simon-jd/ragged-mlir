@@ -2,7 +2,8 @@
 func.func @short(%v: memref<?x128xf32>, %o: memref<?xi32>, %r: memref<?x128xf32>) {
   // CHECK: ragged.dispatch
   // CHECK-SAME: classes = ["warp"]
-  // CHECK-SAME: d_tile = 32 : i64
+  // CHECK-SAME: d_tile = 8 : i64
+  // CHECK-SAME: d_vector = 4 : i64
   // CHECK-SAME: reason = "static length bounds select one class"
   // CHECK-NOT: ragged.classify
   // CHECK: mapping = "warp"

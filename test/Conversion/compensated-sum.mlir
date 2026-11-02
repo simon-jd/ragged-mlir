@@ -18,6 +18,6 @@
 // CHECK: scf.yield %[[NEXT]], %[[NEXTERROR]] : f32, f32
 // CHECK: gpu.barrier
 func.func @sum(%v: memref<?x128xf32>, %o: memref<?xi64>, %r: memref<?x128xf32>) {
-  ragged.segment_reduce %v, %o into %r {kind = "sum", strategy = "naive", row_pipelining = false} : memref<?x128xf32>, memref<?xi64>, memref<?x128xf32>
+  ragged.segment_reduce %v, %o into %r {kind = "sum", strategy = "naive", row_pipelining = false, vectorize = false} : memref<?x128xf32>, memref<?xi64>, memref<?x128xf32>
   return
 }

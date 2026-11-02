@@ -11,7 +11,8 @@ if TYPE_CHECKING:
     from .model import ProgramSpec
 
 BOOL_OPTIONS = ("classification", "online_fusion", "warp_mapping", "split_mapping", "shuffle", "pointwise_fusion",
-                "row_pipelining")
+                "row_pipelining", "vectorize")
+VECTOR_WIDTHS = (1, 2, 4, 8)
 FEATURE_TILES = (1, 2, 4, 8, 16, 32)
 
 
@@ -24,6 +25,7 @@ class Optimizations:
     shuffle: bool = True
     pointwise_fusion: bool = True
     row_pipelining: bool = True
+    vectorize: bool = True
     feature_tile: int | None = None
 
     def __post_init__(self):
@@ -36,8 +38,25 @@ class Optimizations:
     def to_dict(self):
         return asdict(self)
 
-    def resolved_tile(self, d: int) -> int:
-        return self.feature_tile if self.feature_tile is not None else min(32, 1 << (d - 1).bit_length())
+    def geometry(self, d: int, dtype: str = "f32", smem_per_cta: int = 49152) -> tuple[int, int]:
+        """(d_tile, d_vector) as ragged-plan resolves them: each thread owns
+        d_vector adjacent features (a power of two dividing D, at most 16 bytes,
+        whose 128-thread tree fits smem_per_cta) and d_tile threads span a
+        feature tile of min(32, next power of two of D) features. An explicit
+        feature_tile keeps one feature per thread."""
+        element = 2 if dtype == "bf16" else 4
+        vec = 1
+        if self.vectorize and self.feature_tile is None:
+            while 2 * vec * element <= 16 and d % (2 * vec) == 0 and 128 * 2 * vec * 4 <= smem_per_cta:
+                vec *= 2
+        if self.feature_tile is not None:
+            return self.feature_tile, vec
+        features = min(32, 1 << (d - 1).bit_length())
+        vec = min(vec, features)
+        return features // vec, vec
+
+    def resolved_tile(self, d: int, dtype: str = "f32", smem_per_cta: int = 49152) -> int:
+        return self.geometry(d, dtype, smem_per_cta)[0]
 
 
 def computation_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -92,15 +111,18 @@ def validate_optimization_metadata(metadata: dict[str, Any]) -> Optimizations | 
             or any(type(value) is not bool for value in effective.values())):
         raise CacheMismatch("effective optimizations must contain one boolean field per control")
     tile, materialized = metadata.get("d_tile"), metadata.get("pointwise_materialized")
+    vector = metadata.get("d_vector", 1)
     if type(tile) is not int or tile not in FEATURE_TILES or type(materialized) is not bool:
         raise CacheMismatch("optimization results require a supported d_tile and boolean pointwise_materialized")
+    if type(vector) is not int or vector not in VECTOR_WIDTHS:
+        raise CacheMismatch("d_vector must be a power of two in [1,8]")
     if config.feature_tile is not None and tile != config.feature_tile:
         raise CacheMismatch("actual feature tile differs from the requested explicit tile")
     classes = metadata.get("classes", [])
     expected = {"classification": metadata.get("dispatch_abi") == "classified-v3",
                 "online_fusion": metadata.get("fusion") in ("online", "mixed"), "warp_mapping": "warp" in classes,
                 "split_mapping": "split" in classes, "shuffle": "warp" in classes and config.shuffle,
-                "row_pipelining": config.row_pipelining}
+                "row_pipelining": config.row_pipelining, "vectorize": vector > 1}
     if any(effective[name] != value for name, value in expected.items()):
         raise CacheMismatch("effective optimizations disagree with actual dispatch/classes/fusion")
     if any(effective[name] and not requested[name] for name in BOOL_OPTIONS):
@@ -140,9 +162,11 @@ def validate_optimization_spec(spec: ProgramSpec, metadata: dict[str, Any]) -> N
         return
     if metadata["optimizations"]["requested"] != spec.optimizations.to_dict():
         raise CacheMismatch("requested optimizations differ from the source specialization")
-    tile = spec.optimizations.resolved_tile(spec.feature_dim)
+    tile, vector = spec.optimizations.geometry(spec.feature_dim, spec.dtype, spec.smem_per_cta)
     if metadata["d_tile"] != tile:
         raise CacheMismatch("actual feature tile differs from source request/heuristic")
+    if metadata.get("d_vector", 1) != vector:
+        raise CacheMismatch("actual features per thread differ from source request/heuristic")
     pointwise = struct.unpack("f",struct.pack("f",spec.scale))[0] != 1.0 or spec.mask
     materialized = pointwise and not spec.optimizations.pointwise_fusion
     if (metadata["pointwise_materialized"] != materialized
@@ -152,8 +176,9 @@ def validate_optimization_spec(spec: ProgramSpec, metadata: dict[str, Any]) -> N
         raise CacheMismatch("materialized logits feature width differs from source")
     core = computation_metadata(metadata)
     workers = core["kernels"][2:] if core.get("dispatch_abi") == "classified-v3" else core["kernels"]
-    if any(kernel["grid"][1] != (spec.feature_dim + tile - 1) // tile for kernel in workers):
-        raise CacheMismatch("worker grids must cover exactly ceil(D/d_tile) feature tiles")
+    span = tile * vector
+    if any(kernel["grid"][1] != (spec.feature_dim + span - 1) // span for kernel in workers):
+        raise CacheMismatch("worker grids must cover exactly ceil(D/(d_tile*d_vector)) feature tiles")
     fusion = core.get("fusion")
     if ((spec.op == "softmax" and fusion not in ("online","three_pass","mixed"))
             or (spec.op != "softmax" and fusion != "not_applicable")):

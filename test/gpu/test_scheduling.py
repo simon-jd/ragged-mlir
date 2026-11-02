@@ -72,6 +72,40 @@ def test_row_pipelining_is_bitwise_identical_to_the_rolled_loop(gpu_environment,
     assert_matches(pipelined.float().cpu().numpy(), values, offsets, operation=op, input_dtype=dtype)
 
 
+@pytest.mark.parametrize("op,alias", [("sum", "none"), ("max", "none"), ("softmax", "none"), ("softmax", "inplace")])
+@pytest.mark.parametrize("d", [128, 1024])
+@pytest.mark.parametrize("strategy", ["auto", "naive"])
+def test_vector_access_is_bitwise_identical_to_one_feature_per_thread(gpu_environment, op, alias, d, strategy):
+    # For f32 at D >= 128 each thread owns four adjacent features and a tile of
+    # 8 threads covers 32 of them: every row lane, fold and tree is that of the
+    # scalar mapping with an 8-thread tile, and only the accesses are wider.
+    torch, compile_spec, _, _ = gpu_environment
+    spec = ProgramSpec(op, "f32", d, alias=alias, strategy=strategy)
+    values, offsets, device_values, device_offsets = device_case(torch, spec, LENGTHS, 97 + d)
+    vector, report = run(torch, compile_spec(spec), device_values, device_offsets)
+    scalar, scalar_report = run(torch, compile_spec(replace(spec, optimizations=Optimizations(
+        vectorize=False, feature_tile=8))), device_values, device_offsets)
+    assert (report.d_tile, report.d_vector, scalar_report.d_tile, scalar_report.d_vector) == (8, 4, 8, 1)
+    assert report.optimizations["effective"]["vectorize"] is True
+    assert report.grids[-1][1] * 4 == scalar_report.grids[-1][1] == d // 8
+    assert torch.equal(bits(torch, vector), bits(torch, scalar))
+    assert_matches(vector.float().cpu().numpy(), values, offsets, operation=op, input_dtype="f32")
+
+
+@pytest.mark.parametrize("op", ["sum", "max", "softmax"])
+@pytest.mark.parametrize("dtype", ["f32", "bf16"])
+@pytest.mark.parametrize("d", [2, 6, 12, 24, 40])
+def test_every_vector_width_matches_the_oracle(gpu_environment, op, dtype, d):
+    torch, compile_spec, _, _ = gpu_environment
+    spec = ProgramSpec(op, dtype, d)
+    values, offsets, device_values, device_offsets = device_case(torch, spec, LENGTHS[:16], 5 + d)
+    width = max(w for w in (1, 2, 4, 8) if d % w == 0 and w * (2 if dtype == "bf16" else 4) <= 16)
+    for strategy in ("auto", "naive"):
+        output, report = run(torch, compile_spec(replace(spec, strategy=strategy)), device_values, device_offsets)
+        assert report.d_vector == width
+        assert_matches(output.float().cpu().numpy(), values, offsets, operation=op, input_dtype=dtype)
+
+
 @pytest.mark.parametrize("op", ["sum", "max", "softmax"])
 @pytest.mark.parametrize("d", [1, 128])
 def test_concurrent_class_chains_are_bitwise_identical_to_serial(gpu_environment, op, d):

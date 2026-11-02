@@ -23,12 +23,13 @@ LogicalResult verifyDataOp(Operation *op, bool softmax, bool legalized) {
         .Case("debug_visits", true)
         .Cases({"classification", "online_fusion", "warp_mapping", "split_mapping"}, true)
         .Cases({"shuffle", "pointwise_fusion", "row_pipelining", "feature_tile"}, true)
+        .Case("vectorize", true)
         .Cases({"chip", "smem_per_cta", "regs_budget"}, true)
         .Default(false);
     if (legalized)
       known |= llvm::StringSwitch<bool>(name)
           .Cases({"operation", "accumulator", "identity", "nan"}, true)
-          .Cases({"semantics_version", "d_tile", "mapping"}, true)
+          .Cases({"semantics_version", "d_tile", "d_vector", "mapping"}, true)
           .Cases({"fusion", "class_fusion", "fusion_reason"}, true).Default(false);
     if (!known) return op->emitOpError() << "unsupported attribute '" << name << "'";
   }
@@ -111,7 +112,7 @@ LogicalResult verifyDataOp(Operation *op, bool softmax, bool legalized) {
     return op->emitOpError("chip must be a string");
   for (StringRef name : {"offsets_checked", "force_fusion", "debug_visits", "classification",
                          "online_fusion", "warp_mapping", "split_mapping", "shuffle", "pointwise_fusion",
-                         "row_pipelining"})
+                         "row_pipelining", "vectorize"})
     if (Attribute attr = op->getAttr(name); attr && !isa<BoolAttr>(attr))
       return op->emitOpError() << name << " must be a boolean";
   if (Attribute attr = op->getAttr("feature_tile")) {
@@ -254,6 +255,12 @@ LogicalResult ragged::DispatchOp::verify() {
   if (threads < 32 || threads > 1024 || (threads & (threads - 1)) ||
       tile > 32 || (tile & (tile - 1)) || threads % tile)
     return emitOpError("threads must be a power of two in [32, 1024]; d_tile must be a power of two in [1, 32] dividing threads");
+  if (Attribute attr = (*this)->getAttr("d_vector")) {
+    auto vec = dyn_cast<IntegerAttr>(attr);
+    if (!vec || !vec.getType().isInteger(64) || vec.getInt() < 1 || vec.getInt() > 8 ||
+        (vec.getInt() & (vec.getInt() - 1)))
+      return emitOpError("d_vector must be an i64 power of two in [1, 8]");
+  }
   if (classes.size() == 1 && cast<StringAttr>(classes[0]).getValue() == "warp" && threads != 32)
     return emitOpError("a direct warp mapping requires exactly 32 threads");
   unsigned maps = 0, classifiers = 0;

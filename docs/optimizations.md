@@ -1,8 +1,8 @@
 # Optimization controls
 
-Source operations accept seven boolean attributes, defaulting to true:
+Source operations accept eight boolean attributes, defaulting to true:
 `classification`, `online_fusion`, `warp_mapping`, `split_mapping`, `shuffle`,
-`pointwise_fusion` and `row_pipelining`. Optional `feature_tile` is an i64 power of two from 1
+`pointwise_fusion`, `row_pipelining` and `vectorize`. Optional `feature_tile` is an i64 power of two from 1
 through 32. Python groups these options in `Optimizations`, held by
 `ProgramSpec.optimizations`; they specialize the source IR and cache key.
 
@@ -15,14 +15,34 @@ through 32. Python groups these options in `Optimizations`, held by
 | shuffle | Warp workers keep 32 threads and use a shared-memory reduction tree with uniform barriers. |
 | pointwise_fusion | A separate kernel materializes f32 transformed inputs when scale or mask is present. |
 | row_pipelining | Each lane's row loop loads and folds one row per iteration. |
+| vectorize | Each thread reads and writes one feature per row access. |
 
 `feature_tile` overrides the default next power of two of D, capped at 32.
 Feature tile 1 is an ablation of feature packing; it does not mean that all
 features are processed in one CTA. A worker uses `thread_id % tile` as feature
 lane and `thread_id / tile` as row lane, advances rows by `threads / tile`, and
-launches `ceil(D/tile)` feature tiles. Tail features remain guarded; when the
+launches `ceil(D/tile)` feature tiles (with one feature per thread; see `vectorize` below). Tail features remain guarded; when the
 tile divides D every tile is full and the guard is compiled out, so loads carry
 no branch. Runtime binds the resolved tile and grid to the source option.
+
+`vectorize` gives each thread `d_vector` adjacent features of every row it
+visits: the largest power of two that divides D, fits in 16 bytes (four f32,
+eight bf16) and keeps the 128-thread block tree within `smem_per_cta`. A row
+access is then one aligned `vector.load` or `vector.store` (`ld.global.v4`
+for f32). A feature tile spans the same `min(32, next power of two of D)`
+features as without vectors, now covered by `d_tile = features / d_vector`
+threads, so grids keep `ceil(D / (d_tile * d_vector))` feature tiles and a
+128-thread block gets `d_vector` times as many row lanes (16 instead of 4 at
+D=128 f32). Every per-feature fold and tree step is that of the scalar
+mapping with the same tile in threads: vector access with `d_tile = 8` is
+bitwise identical to `vectorize=False, feature_tile=8`
+(`test/gpu/test_scheduling.py`), while results against the default scalar
+tile differ within the oracle tolerance because the row lanes differ. An
+explicit `feature_tile` keeps one feature per thread. Because a vector access needs an
+address aligned to its size, the runtime rejects `values`, `out` or `mask`
+tensors whose base address is not a multiple of `min(16, d_vector * element
+size)` bytes; fresh PyTorch allocations are 512-byte aligned, and a view that
+starts mid-row needs a `vectorize=False` specialization.
 
 `row_pipelining` restructures each lane's row loop (sum, max and exponential-sum
 reductions, online statistics, and normalization). The main loop issues eight
@@ -45,7 +65,8 @@ Online statistics are chosen per segment class and recorded in `class_fusion`
 ([classified-abi.md](classified-abi.md)). They need no length bound (see the
 arithmetic below), so a class uses them unless online fusion is disabled, the
 output aliases the input, or the class's tree exceeds `smem_per_cta`: a
-shuffle warp needs no shared memory, a 128-thread block 1 KiB. Split segments
+shuffle warp needs no shared memory, a 128-thread block 1 KiB per feature
+of `d_vector`. Split segments
 keep a kernel boundary between blocks: each of the eight parts writes its own
 statistics and a combine kernel merges them before normalization.
 `force_fusion=true` requires online statistics in every class. A disjoint
@@ -64,15 +85,17 @@ Sidecars record:
       "classification": true, "online_fusion": true,
       "warp_mapping": true, "split_mapping": true,
       "shuffle": true, "pointwise_fusion": true, "row_pipelining": true,
-      "feature_tile": null
+      "vectorize": true, "feature_tile": null
     },
     "effective": {
       "classification": true, "online_fusion": true,
       "warp_mapping": true, "split_mapping": true,
-      "shuffle": true, "pointwise_fusion": false, "row_pipelining": true
+      "shuffle": true, "pointwise_fusion": false, "row_pipelining": true,
+      "vectorize": true
     }
   },
   "d_tile": 32,
+  "d_vector": 4,
   "pointwise_materialized": false
 }
 ```
@@ -84,7 +107,7 @@ shuffle was requested. Effective online fusion means at least one class uses
 online statistics (`fusion` is `online` or `mixed`).
 Effective pointwise fusion means scale differs from one or mask is present,
 and those operations execute within input reads. Effective row pipelining
-equals the request. If no such transformation
+equals the request. Effective vectorize means `d_vector` is greater than one. If no such transformation
 exists, both effective pointwise fusion and materialization are false. Static
 bounds, aliasing, resources and other requested controls can make an enabled
 optimization inapplicable; the effective record describes emitted kernels.

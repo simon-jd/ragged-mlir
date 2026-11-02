@@ -324,10 +324,10 @@ class CompiledProgram:
                 expected_roles.append(f"{segment_class}_{spec.op}")
         if [kernel["role"] for kernel in metadata["kernels"]] != expected_roles:
             raise CacheMismatch("classified kernel role ordering does not implement the source operation")
-        tile = metadata.get("d_tile",32)
-        if check_tiles and any(kernel["grid"][1] != (spec.feature_dim + tile - 1) // tile
+        span = metadata.get("d_tile",32) * metadata.get("d_vector",1)
+        if check_tiles and any(kernel["grid"][1] != (spec.feature_dim + span - 1) // span
                                for kernel in metadata["kernels"][2:]):
-            raise CacheMismatch("classified worker grid must cover exactly ceil(D/d_tile) feature tiles")
+            raise CacheMismatch("classified worker grid must cover exactly ceil(D/(d_tile*d_vector)) feature tiles")
 
     @classmethod
     def validate_metadata(cls, metadata: dict[str, Any]) -> None:
@@ -505,6 +505,7 @@ class CompiledProgram:
         return {"optimizations":{"requested":self.spec.optimizations.to_dict(),
                                  "effective":dict(effective) if effective is not None else None},
                 "d_tile":self._metadata.get("d_tile"),
+                "d_vector":self._metadata.get("d_vector",1),
                 "pointwise_materialized":self._metadata.get("pointwise_materialized",False),
                 "resources":resource_report(self._metadata)}
 
@@ -533,6 +534,17 @@ class CompiledProgram:
         offset_dtype = {"i32": torch.int32, "i64": torch.int64}[self.spec.offsets_dtype]
         if values.dtype != dtype or out.dtype != dtype or offsets.dtype != offset_dtype:
             raise ValidationError("tensor dtype differs from compiled dtype/offsets specialization")
+        vector = self._metadata.get("d_vector", 1)
+        if vector > 1:
+            # Kernels read and write d_vector adjacent features per access;
+            # D is a multiple of it, so only the base addresses can misalign.
+            for name, tensor in (("values", values), ("out", out), ("mask", mask)):
+                if tensor is not None and tensor.numel():
+                    need = min(16, vector * tensor.element_size())
+                    if tensor.data_ptr() % need:
+                        raise ValidationError(f"{name} must be {need}-byte aligned: this specialization accesses "
+                                              f"{vector} features at a time (compile with vectorize=False for "
+                                              "unaligned views)")
         n, b = values.shape[0], offsets.numel() - 1
         if b == 0 and n != 0 and not checked:
             raise ValidationError("B=0 requires N=0; values cannot exist without segments")

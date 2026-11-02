@@ -14,7 +14,7 @@
 // CHECK-NOT: memref.load %arg0[
 // CHECK: gpu.barrier
 func.func @pipelined(%v: memref<?x64xf32>, %o: memref<?xi64>, %r: memref<?x64xf32>) {
-  ragged.segment_reduce %v, %o into %r {kind = "sum", strategy = "naive"} : memref<?x64xf32>, memref<?xi64>, memref<?x64xf32>
+  ragged.segment_reduce %v, %o into %r {kind = "sum", strategy = "naive", vectorize = false} : memref<?x64xf32>, memref<?xi64>, memref<?x64xf32>
   return
 }
 
@@ -29,6 +29,6 @@ func.func @pipelined(%v: memref<?x64xf32>, %o: memref<?xi64>, %r: memref<?x64xf3
 // CHECK-NOT: memref.load %arg0[
 // CHECK: gpu.barrier
 func.func @rolled(%v: memref<?x64xf32>, %o: memref<?xi64>, %r: memref<?x64xf32>) {
-  ragged.segment_reduce %v, %o into %r {kind = "sum", strategy = "naive", row_pipelining = false} : memref<?x64xf32>, memref<?xi64>, memref<?x64xf32>
+  ragged.segment_reduce %v, %o into %r {kind = "sum", strategy = "naive", row_pipelining = false, vectorize = false} : memref<?x64xf32>, memref<?xi64>, memref<?x64xf32>
   return
 }

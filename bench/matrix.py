@@ -32,7 +32,7 @@ PENDING_METHODS = {
 METHODS = (*RUN_METHODS, *PENDING_METHODS)
 NORMALIZATIONS = ("fixed_elements", "fixed_segments")
 OPTIMIZATION_NAMES = ("classification", "online_fusion", "warp_mapping", "split_mapping", "shuffle", "pointwise_fusion",
-                      "row_pipelining")
+                      "row_pipelining", "vectorize")
 PRESETS = {
     "full": {"ops": ["sum", "max", "softmax"], "dtypes": ["f32", "bf16"], "ds": [1, 16, 128, 1024],
              "offsets_dtypes": ["i32", "i64"], "distributions": [*DISTRIBUTIONS, "public_histogram"],

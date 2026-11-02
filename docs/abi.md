@@ -34,9 +34,11 @@ rank-two workspaces for i64 class counters and original segment IDs, f32 split
 partials, optional f32 softmax statistics, and optional i32 visit counters.
 The runtime validates exact buffer names, dtypes, shapes, roles and launch order
 against this protocol and the source specialization. Every worker grid y must
-equal `ceil(D/d_tile)`, using the compiled feature tile. The default tile is the
-next power of two of D capped at 32; an explicit optimization option can select
-1, 2, 4, 8, 16 or 32. Shape and stride products, per-buffer bytes and total workspace
+equal `ceil(D/(d_tile*d_vector))`, using the compiled feature tile and features
+per thread. By default `d_vector` is the largest power of two dividing D that
+fits 16 bytes, and the tile is `min(32, next power of two of D) / d_vector`
+threads; an explicit optimization option can select a tile of 1, 2, 4, 8, 16 or 32
+with one feature per thread ([optimizations.md](optimizations.md)). Shape and stride products, per-buffer bytes and total workspace
 bytes must fit signed i64. CUDA grid limits are checked before allocation or
 launch. The only new grid symbols are `ceil_B_128` and `min_B_resident`;
 metadata strings are never evaluated as expressions. Device counters do not
