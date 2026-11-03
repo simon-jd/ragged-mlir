@@ -29,8 +29,9 @@ def test_fit_recovers_the_generating_coefficients_and_needs_no_margin():
     for family in ("reduce", "softmax"):
         for schedule, truth in TRUTH.items():
             assert coefficients[family][schedule] == pytest.approx(truth, abs=1e-3)
-    margin, scores = calibrate.margin_by_shape(inputs)
+    margin, scores, excess = calibrate.margin_by_shape(inputs, dict(inputs))
     assert margin == 0.0 and scores[0.0] == len(inputs) >= max(scores.values())
+    assert excess[0.0]["warm"] == excess[0.0]["cold"] and max(excess[0.0]["warm"]) <= calibrate.NOISE_TIE
     model = CostModel.from_dict(calibrate.model_data(coefficients, margin, {}))
     assert calibrate.within(model, inputs) == len(inputs)
 

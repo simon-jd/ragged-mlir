@@ -115,36 +115,56 @@ def model_data(coefficients: dict, margin: float, calibration: dict) -> dict:
             "calibration": calibration}
 
 
-def within(model: CostModel, inputs: list[tuple[tuple, dict]]) -> int:
-    """How many inputs the model's choice puts within 3% of the faster schedule."""
-    count = 0
+def excess(model: CostModel, inputs: list[tuple[tuple, dict]]) -> list[float]:
+    """Per input, how much slower the model's choice measured than the faster schedule."""
+    out = []
     for _, entry in inputs:
         chosen, _ = model.choose(entry["case"]["op"], *shape(entry["case"]))
         times = measured(entry)
-        count += times[chosen] <= min(times.values()) * (1 + NOISE_TIE)
-    return count
+        out.append(times[chosen] / min(times.values()) - 1)
+    return out
 
 
-def margin_by_shape(inputs: list[tuple[tuple, dict]]) -> tuple[float, dict[float, int]]:
-    """The margin that leave-one-shape-out cross-validation puts the most inputs within 3% with."""
+def within(model: CostModel, inputs: list[tuple[tuple, dict]]) -> int:
+    """How many inputs the model's choice puts within 3% of the faster schedule."""
+    return sum(value <= NOISE_TIE for value in excess(model, inputs))
+
+
+def cross_validate(inputs: list[tuple[tuple, dict]], cold: dict | None = None) -> dict[float, dict[str, list[float]]]:
+    """Per margin, the excess of each input's choice when its (N, B, D) shape is
+    left out of the fit; with ``cold`` ({key: entry} of cold-L2 times), also
+    the excess of the same choices on the cold-L2 times."""
     shapes = sorted({shape(entry["case"])[:3] for _, entry in inputs})
-    scores = dict.fromkeys(MARGINS, 0)
+    result = {margin: {"warm": [], "cold": []} for margin in MARGINS}
     for left_out in shapes:
         train = [item for item in inputs if shape(item[1]["case"])[:3] != left_out]
         test = [item for item in inputs if shape(item[1]["case"])[:3] == left_out]
         coefficients = fit(train)
         for margin in MARGINS:
-            scores[margin] += within(CostModel.from_dict(model_data(coefficients, margin, {})), test)
+            model = CostModel.from_dict(model_data(coefficients, margin, {}))
+            result[margin]["warm"] += excess(model, test)
+            if cold is not None:
+                result[margin]["cold"] += excess(model, [(key, cold[key]) for key, _ in test if key in cold])
+    return result
+
+
+def margin_by_shape(inputs: list[tuple[tuple, dict]], cold: dict | None = None):
+    """The margin that leave-one-shape-out cross-validation puts the most
+    inputs within 3% with (warm L2), the count per margin and the excesses."""
+    result = cross_validate(inputs, cold)
+    scores = {margin: sum(value <= NOISE_TIE for value in r["warm"]) for margin, r in result.items()}
     best = max(scores.values())
-    return min(margin for margin, score in scores.items() if score == best), scores
+    return min(margin for margin, score in scores.items() if score == best), scores, result
 
 
 def run_fit(args: argparse.Namespace) -> None:
     found = {(group, *key): entry for group in args.groups
              for key, entry in collect(args.runs, "warm", group).items()}
     inputs = points(found, args.train)
+    cold = dict(points({(group, *key): entry for group in args.groups
+                        for key, entry in collect(args.runs, "cold", group).items()}, args.train))
     coefficients = fit(inputs)
-    margin, scores = margin_by_shape(inputs)
+    margin, scores, result = margin_by_shape(inputs, cold)
     shapes = sorted({shape(entry["case"])[:3] for _, entry in inputs})
     data = model_data(coefficients, margin, {
         "runs": str(args.runs), "groups": args.groups, "train_seeds": args.train, "l2": "warm",
@@ -157,8 +177,13 @@ def run_fit(args: argparse.Namespace) -> None:
     args.output.write_text(json.dumps(data, indent=2) + "\n")
     model = CostModel.from_dict(data)
     print(f"{len(inputs)} inputs in {len(shapes)} (N, B, D) shapes; coefficients {json.dumps(coefficients)}")
-    print("left-out inputs within 3% per margin: " +
-          ", ".join(f"{round(100 * m)}% {score}" for m, score in scores.items()) + f"; margin {margin:.2f}")
+    print(f"leave-one-shape-out, per margin: left-out inputs within 3% of the faster schedule and their mean "
+          f"excess, warm L2 (which chooses the margin, {margin:.2f}) and, for the same choices, cold L2")
+    for m, r in result.items():
+        warm, cold_excess = r["warm"], r["cold"]
+        print(f"  {round(100 * m):3}%  warm {scores[m]:3} of {len(warm)}  {100 * statistics.mean(warm):+5.2f}%   "
+              f"cold {sum(x <= NOISE_TIE for x in cold_excess):3} of {len(cold_excess)}  "
+              f"{100 * statistics.mean(cold_excess):+5.2f}%")
     print(f"within 3% of the faster schedule on the training inputs: {within(model, inputs)} of {len(inputs)}")
     print(f"{'group':8} {'case':32} {'seed':>4} {'classified':>10} {'pred':>7} {'naive':>8} {'pred':>7}  chosen")
     for (group, name, seed), entry in inputs:
