@@ -11,7 +11,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/ErrorHandling.h"
 #include <limits>
+#include <optional>
 
 using namespace mlir;
 namespace ragged {
@@ -114,6 +117,70 @@ DictionaryAttr emitMaterialize(OpBuilder &b, gpu::GPUModuleOp gpuModule,
       b.getNamedAttr("static_shared_bytes", b.getI64IntegerAttr(0))});
 }
 
+// What a CTA kernel body computes. Roles in the manifest are the class name
+// and the phase name ("cta_online", "split_partial_max", ...).
+enum class Phase {
+  Sum, Max,                                  // segmented reduction to out
+  MaxStats, SumStats, Normalize,             // three-pass softmax
+  Online,                                    // online statistics, then normalize
+  Softmax,                                   // all three passes in one kernel
+  PartialSum, PartialMax, PartialExpSum,     // a split part's partial result
+  PartialOnline,                             // a split part's online statistics
+  CombineSum, CombineMax,                    // merge eight parts into out
+  CombineMaxStats, CombineSumStats,          // merge eight parts into statistics
+  CombineOnline,                             // merge eight parts' online statistics
+};
+std::optional<Phase> parsePhase(StringRef name) {
+  return llvm::StringSwitch<std::optional<Phase>>(name)
+      .Case("sum", Phase::Sum).Case("max", Phase::Max)
+      .Case("max_stats", Phase::MaxStats).Case("sum_stats", Phase::SumStats)
+      .Case("normalize", Phase::Normalize).Case("online", Phase::Online)
+      .Case("softmax", Phase::Softmax)
+      .Case("partial_sum", Phase::PartialSum).Case("partial_max", Phase::PartialMax)
+      .Case("partial_exp_sum", Phase::PartialExpSum).Case("partial_online", Phase::PartialOnline)
+      .Case("combine_sum", Phase::CombineSum).Case("combine_max", Phase::CombineMax)
+      .Case("combine_max_stats", Phase::CombineMaxStats)
+      .Case("combine_sum_stats", Phase::CombineSumStats)
+      .Case("combine_online", Phase::CombineOnline)
+      .Default(std::nullopt);
+}
+// The phase of a kernel this pass emits; every such name parses.
+Phase phaseOf(StringRef name) {
+  std::optional<Phase> phase = parsePhase(name);
+  if (!phase) llvm::report_fatal_error(llvm::Twine("unknown ragged kernel phase: ") + name);
+  return *phase;
+}
+// Phases whose kernel writes the program's output.
+bool writesOutput(Phase phase) {
+  switch (phase) {
+  case Phase::Sum: case Phase::Max: case Phase::Online: case Phase::Normalize:
+  case Phase::CombineSum: case Phase::CombineMax:
+    return true;
+  default:
+    return false;
+  }
+}
+// The fold a row traversal applies: a sum, a maximum, or a sum of exp(x - max).
+enum class Reduction { Sum, Max, ExpSum };
+
+// The buffers and geometry one CTAEmitter works on. Absent values are unused
+// by the phases a kernel emits; `segment` defaults to the block's x index.
+struct CTAParams {
+  CTAParams(int64_t threads, int64_t tile, int64_t vec, ValueRange operands, Value shared)
+      : threads(threads), tile(tile), vec(vec), values(operands[0]), offsets(operands[1]),
+        out(operands[2]), shared(shared) {}
+  int64_t threads, tile, vec;   // block size, feature lanes, features per lane
+  Value values, offsets, out;   // the operation's operands
+  Value shared;                 // workgroup tree storage (none with shuffles)
+  bool useShuffle = false;      // reduce a warp's row lanes with shuffles
+  Value mask, logits;           // additive mask; materialized pointwise input
+  Value segment;                // segment from a class queue
+  Value maxStats, sumStats;     // softmax statistics, [B, D]
+  Value partials, partialSums;  // split parts' results, [B_split, 8 * D]
+  Value part;                   // split part (block z)
+  Value partialIndex;           // row of the partial buffers (split-queue position)
+};
+
 // The baseline maps one CTA to one (segment, feature tile). Every barrier is
 // reached by every CTA thread, including threads in a partial feature tile.
 // A thread owns `vec` adjacent features of each row it visits: one vector
@@ -122,22 +189,18 @@ DictionaryAttr emitMaterialize(OpBuilder &b, gpu::GPUModuleOp gpuModule,
 class CTAEmitter {
 public:
   using Lanes = SmallVector<Value, 8>;
-  CTAEmitter(OpBuilder &builder, MapSegmentsOp source, int64_t threads,
-             int64_t tile, int64_t vec, ValueRange args, Value shared,
-             Value segmentOverride = {}, Value maximumStats = {},
-             Value totalStats = {}, Value partialBuffer = {},
-             Value partId = {}, bool useShuffle = false, Value mask = {}, Value logits = {},
-             Value partialSumBuffer = {}, Value partialIndex = {})
-      : b(builder), loc(source.getLoc()), source(source), threads(threads),
-        tile(tile), vec(vec), useShuffle(useShuffle), values(args[0]), offsets(args[1]),
-        out(args[2]), shared(shared), maxStats(maximumStats), sumStats(totalStats),
-        partials(partialBuffer), partialSums(partialSumBuffer), part(partId), mask(mask), logits(logits) {
+  CTAEmitter(OpBuilder &builder, MapSegmentsOp source, const CTAParams &params)
+      : b(builder), loc(source.getLoc()), source(source), threads(params.threads),
+        tile(params.tile), vec(params.vec), useShuffle(params.useShuffle), values(params.values),
+        offsets(params.offsets), out(params.out), shared(params.shared), maxStats(params.maxStats),
+        sumStats(params.sumStats), partials(params.partials), partialSums(params.partialSums),
+        part(params.part), mask(params.mask), logits(params.logits) {
     zero = index(b, loc, 0); one = index(b, loc, 1);
     tid = b.create<gpu::ThreadIdOp>(loc, gpu::Dimension::x);
-    segment = segmentOverride ? segmentOverride : Value(b.create<gpu::BlockIdOp>(loc, gpu::Dimension::x));
+    segment = params.segment ? params.segment : Value(b.create<gpu::BlockIdOp>(loc, gpu::Dimension::x));
     // Split partials are indexed by split-queue position, not segment ID, so
     // the buffers need only as many rows as there can be split segments.
-    partialRow = partialIndex ? partialIndex : segment;
+    partialRow = params.partialIndex ? params.partialIndex : segment;
     Value dBlock = b.create<gpu::BlockIdOp>(loc, gpu::Dimension::y);
     Value tileValue = index(b, loc, tile);
     featureLane = b.create<arith::RemUIOp>(loc, tid, tileValue);
@@ -177,40 +240,58 @@ public:
     rowStep = index(b, loc, threads / tile);
   }
 
-  void emit(StringRef phase) {
-    if (phase == "partial_online") {
+  void emit(Phase phase) {
+    switch (phase) {
+    case Phase::PartialOnline: {
       // A split part's reference and mass, merged by combine_online.
       auto stats = onlineStatistics();
       Value column = partColumn(part);
       storeLeader(stats.first, partials, false, column, partialRow);
       storeLeader(stats.second, partialSums, false, column, partialRow);
-    } else if (phase == "combine_online") {
+      break;
+    }
+    case Phase::CombineOnline:
       combineOnline();
-    } else if (phase.starts_with("combine_")) {
-      combinePartials(phase.drop_front(8));
-    } else if (phase.starts_with("partial_")) {
-      StringRef kind = phase.drop_front(8);
-      Lanes maximum = kind == "exp_sum" ? loadStat(maxStats) : Lanes();
+      break;
+    case Phase::CombineSum: case Phase::CombineMax:
+    case Phase::CombineMaxStats: case Phase::CombineSumStats:
+      combinePartials(phase);
+      break;
+    case Phase::PartialSum: case Phase::PartialMax: case Phase::PartialExpSum: {
+      Reduction kind = phase == Phase::PartialSum ? Reduction::Sum
+                       : phase == Phase::PartialMax ? Reduction::Max : Reduction::ExpSum;
+      Lanes maximum = kind == Reduction::ExpSum ? loadStat(maxStats) : Lanes();
       Lanes result = reduce(kind, maximum);
       storeLeader(result, partials, false, partColumn(part), partialRow);
-    } else if (phase == "sum" || phase == "max") {
-      storeLeader(reduce(phase, {}), out, true);
-    } else if (phase == "max_stats") {
-      storeLeader(reduce("max", {}), maxStats, false);
-    } else if (phase == "sum_stats") {
+      break;
+    }
+    case Phase::Sum: case Phase::Max:
+      storeLeader(reduce(phase == Phase::Sum ? Reduction::Sum : Reduction::Max, {}), out, true);
+      break;
+    case Phase::MaxStats:
+      storeLeader(reduce(Reduction::Max, {}), maxStats, false);
+      break;
+    case Phase::SumStats: {
       Lanes maximum = loadStat(maxStats);
-      storeLeader(reduce("exp_sum", maximum), sumStats, false);
-    } else if (phase == "normalize") {
+      storeLeader(reduce(Reduction::ExpSum, maximum), sumStats, false);
+      break;
+    }
+    case Phase::Normalize:
       normalize(loadStat(maxStats), loadStat(sumStats));
-    } else if (phase == "online") {
+      break;
+    case Phase::Online: {
       auto stats = onlineStatistics();
       normalize(stats.first, stats.second);
-    } else if (phase == "softmax") {
-      Lanes maximum = reduce("max", {});
+      break;
+    }
+    case Phase::Softmax: {
+      Lanes maximum = reduce(Reduction::Max, {});
       // All consumers finish the max read before shared storage is reused.
       b.create<gpu::BarrierOp>(loc);
-      Lanes total = reduce("exp_sum", maximum);
+      Lanes total = reduce(Reduction::ExpSum, maximum);
       normalize(maximum, total);
+      break;
+    }
     }
   }
 
@@ -315,9 +396,9 @@ private:
         b.create<scf::YieldOp>(loc, fold(iter, partColumn(p)));
       }).getResults();
   }
-  void combinePartials(StringRef phase) {
-    bool maximum = phase == "max" || phase == "max_stats";
-    bool stats = phase.ends_with("_stats");
+  void combinePartials(Phase phase) {
+    bool maximum = phase == Phase::CombineMax || phase == Phase::CombineMaxStats;
+    bool stats = phase == Phase::CombineMaxStats || phase == Phase::CombineSumStats;
     Value destination = stats ? (maximum ? maxStats : sumStats) : out;
     Value leader = b.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, rowLane, zero);
     Value active = b.create<arith::AndIOp>(loc, leader, validFeature);
@@ -538,23 +619,23 @@ private:
   Lanes loadStat(Value buffer) {
     return chooseLanes(validFeature, fp(b, loc, 0), [&] { return loadLanes(buffer, segment, feature); });
   }
-  Value combine(StringRef kind, Value lhs, Value rhs) {
-    if (kind == "max") return b.create<arith::MaximumFOp>(loc, lhs, rhs);
+  Value combine(Reduction kind, Value lhs, Value rhs) {
+    if (kind == Reduction::Max) return b.create<arith::MaximumFOp>(loc, lhs, rhs);
     return b.create<arith::AddFOp>(loc, lhs, rhs);
   }
-  Lanes reduce(StringRef kind, ArrayRef<Value> maximum) {
-    Value identity = fp(b, loc, kind == "max" ? -std::numeric_limits<float>::infinity() : 0.0f);
+  Lanes reduce(Reduction kind, ArrayRef<Value> maximum) {
+    Value identity = fp(b, loc, kind == Reduction::Max ? -std::numeric_limits<float>::infinity() : 0.0f);
     // A lane may visit thousands of rows before the CTA tree. Ordinary serial
     // f32 addition can exceed the shared oracle tolerance even for repeated
     // 0.1 inputs, so carry the rounding error through the lane traversal.
-    bool compensated = kind != "max";
+    bool compensated = kind != Reduction::Max;
     int64_t width = compensated ? 2 : 1;
     Value positiveInfinity = fp(b, loc, std::numeric_limits<float>::infinity());
     auto loop = forRows(SmallVector<Value>(vec * width, identity),
       [&](Value row) {
         return chooseLanes(validFeature, identity, [&] {
           Lanes x = loadInput(row);
-          if (kind == "exp_sum")
+          if (kind == Reduction::ExpSum)
             for (int64_t v = 0; v < vec; ++v)
               x[v] = b.create<math::ExpOp>(loc, b.create<arith::SubFOp>(loc, x[v], maximum[v]));
           return x;
@@ -795,7 +876,7 @@ private:
     b.setInsertionPointToStart(&function.getBody().front());
     if (phase == "init") emitInit();
     else if (phase == "classify") emitClassify();
-    else emitPersistent(segmentClass, phase, threads, parts, shared);
+    else emitPersistent(segmentClass, phaseOf(phase), threads, parts, shared);
     b.create<gpu::ReturnOp>(loc);
     int64_t staticShared = 0;
     for (BlockArgument attribution : function.getWorkgroupAttributionBBArgs()) {
@@ -915,7 +996,7 @@ private:
           ValueRange{selected, b.create<arith::IndexCastOp>(loc, b.getIndexType(), position)});
     });
   }
-  void emitPersistent(StringRef segmentClass, StringRef phase, int64_t threads,
+  void emitPersistent(StringRef segmentClass, Phase phase, int64_t threads,
                       int64_t parts, Value shared) {
     Value queue = index(b, loc, classId(segmentClass));
     Value count = b.create<memref::LoadOp>(loc, argument("class_counts"), ValueRange{queue});
@@ -929,15 +1010,19 @@ private:
         Value segment = b.create<memref::LoadOp>(loc, argument("segment_ids"), ValueRange{queue, position});
         segment = b.create<arith::IndexCastOp>(loc, b.getIndexType(), segment);
         Value part = parts == 8 ? Value(b.create<gpu::BlockIdOp>(loc, gpu::Dimension::z)) : Value();
-        CTAEmitter emitter(b, map, threads, tile, vec, function.getArguments().take_front(3), shared,
-                           segment, argument("max_stats"), argument("sum_stats"),
-                           argument("partials"), part, segmentClass == "warp" && enabled(map, "shuffle"),
-                           map.getMask() ? Value(function.getArgument(3)) : Value(), argument("logits"),
-                           argument("partial_sums"), segmentClass == "split" ? position : Value());
-        emitter.emit(phase);
-        bool finalOutput = phase == "sum" || phase == "max" || phase == "online" ||
-                           phase == "normalize" || phase == "combine_sum" || phase == "combine_max";
-        if (debugVisits && finalOutput) {
+        CTAParams params(threads, tile, vec, function.getArguments().take_front(3), shared);
+        params.useShuffle = segmentClass == "warp" && enabled(map, "shuffle");
+        params.mask = map.getMask() ? Value(function.getArgument(3)) : Value();
+        params.logits = argument("logits");
+        params.segment = segment;
+        params.maxStats = argument("max_stats");
+        params.sumStats = argument("sum_stats");
+        params.partials = argument("partials");
+        params.partialSums = argument("partial_sums");
+        params.part = part;
+        params.partialIndex = segmentClass == "split" ? position : Value();
+        CTAEmitter(b, map, params).emit(phase);
+        if (debugVisits && writesOutput(phase)) {
           Value tid = b.create<gpu::ThreadIdOp>(loc, gpu::Dimension::x);
           Value featureBlock = b.create<gpu::BlockIdOp>(loc, gpu::Dimension::y);
           Value zero = index(b, loc, 0);
@@ -1237,9 +1322,13 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
         Value sumStats = separateStats ? Value(function.getArgument(sourceArguments + 1)) : Value();
         Value mask = map.getMask() ? Value(function.getArgument(3)) : Value();
         Value logits = materialized ? Value(function.getArgument(logitsIndex)) : Value();
-        CTAEmitter emitter(b, map, threads, tile, vec, function.getArguments().take_front(3), shared,
-                           {}, maxStats, sumStats, {}, {}, useShuffle, mask, logits);
-        emitter.emit(phase);
+        CTAParams params(threads, tile, vec, function.getArguments().take_front(3), shared);
+        params.useShuffle = useShuffle;
+        params.mask = mask;
+        params.logits = logits;
+        params.maxStats = maxStats;
+        params.sumStats = sumStats;
+        CTAEmitter(b, map, params).emit(phaseOf(phase));
         b.create<gpu::ReturnOp>(map.getLoc());
         SmallVector<NamedAttribute> fields{
           b.getNamedAttr("name", b.getStringAttr(name)),
