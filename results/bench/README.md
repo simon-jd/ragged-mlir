@@ -26,6 +26,8 @@ Measured on an RTX 4090 (driver 595.99, CUDA 13.2) at commit
 - `runs/heldout/` and `calibration/heldout-shapes.txt`: the cost model on
   seven shapes it was not fitted on, fixed in `bench/suite.py`
   (`HELDOUT_SHAPES`) before they were measured (below).
+- `burst-gap/`: both ragged programs interleaved in one process on the D=1
+  bursty sum of each seed (below); `run.py` produced `results.json`.
 - `profile.txt`: Nsight Systems kernel traces of both schedules on seed 711's
   inputs, warm and cold L2.
 - `host.txt`: host time per call of both schedules.
@@ -68,3 +70,26 @@ softmax, 19 to 20% slower). The D=1 shapes are also the noisiest: their calls
 take 24 to 167 µs, much of it host time, and in 7 of their 162 (workload,
 seed, method) cells one run is 1.5 to 2.5 times the cell's median, which
 three repetitions per seed do not always outvote.
+
+## Seed 711's bursty D=1 sum
+
+`calibration/evaluation.txt` shows the adaptive call 6.7% slower than
+`ragged-naive` on seed 711's bursty D=1 sum (32.8 against 30.7 µs), although
+both run the same kernel there. The seed does not change this workload's
+lengths, only where the burst of long segments starts, and four of the five
+`ragged-naive` runs of seed 711 measured 30.7 µs against 32.5 to 32.8 µs on
+the other seeds. Interleaving the two programs in one process (`burst-gap/`:
+10 rounds of 30 calls each, alternating the order) does not reproduce the
+gap:
+
+| Seed | ragged-naive | ragged (adaptive) | host enqueue, naive / adaptive | kernel, both |
+|---:|---:|---:|---:|---:|
+| 711 | 31.7 | 31.9 | 27.5 / 28.4 | 14.4 |
+| 712 | 36.4 | 36.0 | 36.6 / 35.4 | 14.4 |
+| 713 | 34.6 | 35.3 | 33.5 / 34.4 | 14.4 |
+
+The kernel takes 14.4 µs for every seed (torch.profiler); the rest of the
+call is host time, which the GPU waits for at D=1. The adaptive call's
+schedule lookup adds about 1 µs of host work at most, and the 2 µs of the
+suite is run-to-run variation in that host part, which the first rounds of
+each seed also show (73 to 130 µs before the process settles).
