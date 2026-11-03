@@ -9,9 +9,16 @@
 | PyTorch | 2.14.1+cu132 | GPU tests, benchmarks, custom-op registration; the CPU build runs the host tests |
 | Triton | 3.8.0, using the toolkit's ptxas and libdevice | the Triton comparison kernel |
 | CCCL / CUB | 3.5.0 (`CUB_VERSION=300500`, checked at compile and load time) | the CUB comparison |
-| FBGEMM_GPU | 1.8.0, optional | `jagged_softmax` comparison when installed; not installed for the published results |
+| FBGEMM_GPU | 1.9.0+cu130, optional | `segment_sum_csr` (D=1 sum) and `jagged_softmax` comparisons |
 
-FBGEMM 1.8.0 documents PyTorch 2.13 and CUDA 12.6/13.0 as its tested pairing;
-using it with PyTorch 2.14 is outside that matrix, which is why it is optional.
+FBGEMM publishes no CUDA 13.2 build: its releases dropped cu132 wheels. The
+`fbgemm-gpu==1.9.0+cu130` wheel from the PyTorch cu130 index is built for
+PyTorch 2.14 and loads in the pinned PyTorch 2.14.1+cu132 environment, whose
+CUDA 13.2 runtime it uses under CUDA minor-version compatibility
+(`pip install --no-deps fbgemm-gpu==1.9.0+cu130 --index-url
+https://download.pytorch.org/whl/cu130`). The GPU tests check it against the
+oracle; it fails on logits outside the offsets' integer range and on `+inf`
+after a finite logit (strict xfails in `test/gpu/test_fbgemm_baseline.py`),
+which the benchmark's inputs do not contain.
 Source and compiler provenance (LLVM commit, ptxas version, compiler hash) is
 recorded in every artifact manifest; see [provenance](provenance.md).

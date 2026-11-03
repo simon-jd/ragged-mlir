@@ -47,8 +47,10 @@ for empty segments, outputs cast back to the input dtype, offsets assumed valid
   itself. It uses the CUDA toolkit's ptxas and libdevice
   (`TRITON_PTXAS_PATH`, `TRITON_LIBDEVICE_PATH`), with FMA fusion and
   flush-to-zero disabled.
-- `fbgemm_reference.py`: FBGEMM 1.8 `jagged_softmax` on packed values and the
-  original offsets, with `max_L=N` unless length hints give the exact maximum.
+- `fbgemm_reference.py`: FBGEMM 1.9 `jagged_softmax` on packed values and the
+  original offsets, with `max_L=N` unless length hints give the exact maximum,
+  and `segment_sum_csr` for the D=1 sum (one block per segment; at D>1 it sums
+  all of a segment's features together, so it has no per-feature sum).
   Optional; see [compatibility](../docs/compatibility.md).
 
 Build the CUDA/CUB library against CCCL 3.5.0 headers:

@@ -82,8 +82,9 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
         return result.to(values.dtype)
 
     if method == "fbgemm":
-        if args.op != "softmax":
-            raise NotApplicable("FBGEMM jagged_softmax has no sum or max operation")
+        if args.op == "max" or (args.op == "sum" and args.d != 1):
+            raise NotApplicable("FBGEMM has segment_sum_csr for the D=1 sum and jagged_softmax; no max "
+                                "or per-feature sum")
         from baselines import fbgemm_reference
         max_len = getattr(args, "length_bounds", {}).get("max_len")
         try:
@@ -96,9 +97,10 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
         except fbgemm_reference.OptionalDependencyUnavailable as exc:
             raise Unmeasured(str(exc)) from exc
         metadata = {**metadata, **configuration,
-                    "baseline_strategy": "public FBGEMM jagged_softmax; packed input, f32 promotion, original-dtype output; no truncated segments"}
+                    "baseline_strategy": "public FBGEMM segment_sum_csr (D=1 sum) or jagged_softmax; packed input, "
+                                         "f32 promotion, original-dtype output; no truncated segments"}
         return lambda: baseline_output(fbgemm_reference.call(
-            baseline_input(), offsets, "softmax", max_len=max_len)), metadata
+            baseline_input(), offsets, args.op, max_len=max_len)), metadata
 
     if method == "triton":
         # An isolated cache (the default) makes the first call include compilation;

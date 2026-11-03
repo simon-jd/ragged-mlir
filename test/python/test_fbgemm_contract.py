@@ -14,14 +14,14 @@ def clear_package_cache():
     adapter._load.cache_clear()
 
 
-@pytest.mark.parametrize("version", ["1.8.0", "1.8.0+cu130", "1.8.0+git.abc"])
+@pytest.mark.parametrize("version", ["1.9.0", "1.9.0+cu130", "1.9.0+git.abc"])
 def test_pinned_release_and_local_build_identity(version):
     assert adapter._release(version) == version
 
 
-@pytest.mark.parametrize("version", [None, 180, "1.7.0", "1.8.1", "1.8.0rc1", "1.8.0.dev0", "1.8.0\n", "1.8.0+"])
+@pytest.mark.parametrize("version", [None, 190, "1.8.0", "1.9.1", "1.9.0rc1", "1.9.0.dev0", "1.9.0\n", "1.9.0+"])
 def test_other_versions_are_failures(version):
-    with pytest.raises(RuntimeError, match="requires release 1.8.0"):
+    with pytest.raises(RuntimeError, match="requires release 1.9.0"):
         adapter._release(version)
 
 
@@ -76,7 +76,7 @@ def test_wrong_installed_version_rejected_before_import(monkeypatch):
                                   ModuleNotFoundError("installed package has a missing dependency"),
                                   OSError("cannot open native shared object")])
 def test_installed_import_errors_remain_failures(monkeypatch, error):
-    monkeypatch.setattr(adapter.metadata, "version", lambda _: "1.8.0")
+    monkeypatch.setattr(adapter.metadata, "version", lambda _: "1.9.0")
     def broken_import(_):
         raise error
     monkeypatch.setattr(adapter.importlib, "import_module", broken_import)
@@ -85,7 +85,7 @@ def test_installed_import_errors_remain_failures(monkeypatch, error):
     assert actual.value is error
 
 
-def fake_install(monkeypatch, tmp_path, *, module_version="1.8.0+test", operator=True, native=True):
+def fake_install(monkeypatch, tmp_path, *, module_version="1.9.0+test", operator=True, native=True):
     init = tmp_path / "__init__.py"
     init.write_text("# synthetic package identity fixture, not executable FBGEMM\n")
     library = tmp_path / "libfixture.so"
@@ -95,7 +95,7 @@ def fake_install(monkeypatch, tmp_path, *, module_version="1.8.0+test", operator
     operation = object()
     torch = SimpleNamespace(__version__="fixture", version=SimpleNamespace(cuda=None),
                             ops=SimpleNamespace(fbgemm=SimpleNamespace(**({"jagged_softmax": operation} if operator else {}))))
-    monkeypatch.setattr(adapter.metadata, "version", lambda _: "1.8.0+test")
+    monkeypatch.setattr(adapter.metadata, "version", lambda _: "1.9.0+test")
     def fake_import(name):
         assert name in ("fbgemm_gpu", "torch")
         return {"fbgemm_gpu": package, "torch": torch}[name]
@@ -117,7 +117,7 @@ def test_provenance_hashes_inventory_and_defensive_copy(monkeypatch, tmp_path):
     init, library, operation = fake_install(monkeypatch, tmp_path)
     record = adapter.toolchain()
     assert adapter._load()[0] is operation
-    assert record["fbgemm_gpu"] == "1.8.0+test"
+    assert record["fbgemm_gpu"] == "1.9.0+test"
     assert record["package_init_sha256"] == hashlib.sha256(init.read_bytes()).hexdigest()
     assert record["native_libraries"] == [{"path": str(library), "sha256": hashlib.sha256(library.read_bytes()).hexdigest()}]
     assert record["compatibility"] == "unverified" and record["device_semantics"] == "unqualified"
@@ -179,7 +179,7 @@ def test_real_cpu_input_admission_rejects_without_optional_package(monkeypatch, 
     if bad == "float64": values = values.double()
     if bad == "offset_float": offsets = offsets.float()
     if bad == "grad": values.requires_grad_(True)
-    if bad == "operation": op = "sum"
+    if bad == "operation": op = "max"
     monkeypatch.setattr(adapter, "_load", lambda: pytest.fail("invalid inputs reached optional load"))
     with pytest.raises(ValueError):
         adapter.call(values, offsets, op)

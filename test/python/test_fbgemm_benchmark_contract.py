@@ -18,7 +18,7 @@ def forbidden(*args, **kwargs):
 
 
 def provenance():
-    return {"fbgemm_gpu": "1.8.0", "source_sha256": "synthetic-host-fixture",
+    return {"fbgemm_gpu": "1.9.0", "source_sha256": "synthetic-host-fixture",
             "native_libraries": [{"path": "synthetic-not-a-library.so", "sha256": "not-device-evidence"}],
             "known_risks": list(adapter.KNOWN_RISKS), "device_semantics": "unqualified"}
 
@@ -59,11 +59,11 @@ def test_preprocessing_is_inside_every_call_and_bound_is_shared(tmp_path, monkey
     assert len(observed) == 2
 
 
-@pytest.mark.parametrize("operation", ["sum", "max"])
-def test_known_unsupported_operation_is_not_applicable_without_loading_package(tmp_path, monkeypatch, operation):
+@pytest.mark.parametrize("operation,d", [("max", 1), ("max", 128), ("sum", 128)])
+def test_known_unsupported_operation_is_not_applicable_without_loading_package(tmp_path, monkeypatch, operation, d):
     monkeypatch.setattr(adapter, "toolchain", forbidden)
-    with pytest.raises(benchmark.NotApplicable, match="no sum or max"):
-        benchmark.make_call("fbgemm", SimpleNamespace(op=operation, scale=1.0), None, None, None, tmp_path)
+    with pytest.raises(benchmark.NotApplicable, match="no max"):
+        benchmark.make_call("fbgemm", SimpleNamespace(op=operation, d=d, scale=1.0), None, None, None, tmp_path)
 
 
 @pytest.mark.parametrize("n,d,b,bound", [(adapter.MAX_LENGTH + 1, 1, 1, None),
