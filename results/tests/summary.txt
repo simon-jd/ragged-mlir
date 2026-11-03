@@ -1,12 +1,17 @@
 Test runs on home-ubuntu (RTX 4090, driver 595.99, CUDA 13.2).
 
-GPU tests at commit f0bd6903feb5b75c52cd1857e666887a14ee9db7, the commit the benchmark measured
-(PyTorch 2.14.1+cu132, Triton 3.8.0; FBGEMM not installed, so its cases skip):
+GPU tests at commit 2d699706fa98f18ab52a66164636c9f85352ea68, the commit the compare runs measured
+(PyTorch 2.14.1+cu132, Triton 3.8.0, FBGEMM_GPU 1.9.0+cu130):
   PYTHONPATH=python:. RAGGED_COMPILE=build/bin/ragged-compile python -m pytest test/gpu
-  2,132 passed, 164 skipped, 0 failed in 8.2 min
+  2,170 passed, 30 xfailed, 0 failed in 7.3 min
+  The 30 strict xfails are FBGEMM jagged_softmax cases that return NaN: logits outside the
+  offsets' integer range and +inf after a finite logit (test/gpu/test_fbgemm_baseline.py).
 
-Host tests and lit tests at the same commit:
-  python -m pytest                  (test/python, CPU PyTorch 2.14.1)   1,731 passed
+Host tests and lit tests at commit 2d699706fa98f18ab52a66164636c9f85352ea68:
+  python -m pytest                  (test/python, CPU PyTorch 2.14.1)   1,173 passed
+  the same in a clean export without build outputs, as on the CPU CI runner: 1,055 passed, 118 skipped
   ninja -C build check-ragged       (lit/FileCheck)                      41 passed
 
-compute-sanitizer runs: ../sanitizer/summary.txt.
+compute-sanitizer runs: ../sanitizer/summary.txt, at f0bd6903feb5b75c52cd1857e666887a14ee9db7.
+The GPU dialect, PTX and kernel manifests of 300 program specializations are byte for byte the
+same at 3afdb08 (the CTAEmitter refactor) as before it.

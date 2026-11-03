@@ -5,21 +5,26 @@
   schedules, chosen by a calibrated cost model from N, B, D and the longest
   segment: a warp, block or multi-block mapping per segment chosen on the
   device, or one block per segment.
-- On an RTX 4090, with a warm L2, it beats every comparison in 7 of 19
-  workloads, is within 10% of the fastest in 5 and is more than 10% slower in
-  7 (cold L2: 3, 7 and 9). The comparisons are autotuned Triton, CUB,
-  `torch.segment_reduce`, NJT and a CUDA block-per-segment kernel. Its weakest
-  cases are D=1 sum and max, where `torch.segment_reduce`, CUB or Triton is
-  1.1 to 2.2 times faster, and the bf16 long-tail softmax, where Triton is 1.4
-  times faster.
-- The choice never costs more than noise against the compiler's own
-  block-per-segment mode with a warm L2 (at most 1.4% over the 15 runs, 1.1%
-  on the seed held out of calibration); with a cold L2 it is up to 5% slower
-  on the three uniform D=128 workloads.
+- On an RTX 4090, against the fastest of seven comparisons per workload
+  (autotuned Triton, CUB, cuSPARSE, FBGEMM, `torch.segment_reduce`,
+  compiled NJT and a CUDA block-per-segment kernel), it wins 4 of 19
+  workloads, ties 6 (within 3%) and loses 9 with a warm L2; with a cold L2 it
+  wins 1, ties 4 and loses 14; replaying each call as a CUDA graph, which
+  removes host overhead from every method, it wins 5, ties 6 and loses 8.
+- It wins the uniform D=128 sum and max and the uniform and long-tail D=1
+  softmax. Its losses: the D=1 sum and max (1.1 to 2.2 times slower warm,
+  1.1 to 3.1 times on graph replay), the long-tail D=128 sum, where cuSPARSE
+  is 1.13 times faster, and the bursty f32 and long-tail bf16 D=128 softmax,
+  where tuned Triton is 1.05 and 1.38 times faster.
+- The schedule choice stays within noise of the compiler's own
+  block-per-segment mode on the two benchmark shapes it was fitted on, but
+  extrapolates poorly: on seven held-out shapes the adaptive call is within
+  3% of the faster schedule for 115 of 189 inputs, and it is systematically
+  wrong at D=1 with 65,536 segments and at D=32 and 64 with uniform lengths.
 - Each time is the median of 15 processes (3 seeds of the length distribution
   × 5 repetitions). Every method passes a float64 oracle before it is timed.
 
-![ragged's speedup over the fastest comparison method per workload, warm and cold L2](docs/speedup.svg)
+![ragged's speedup over the fastest comparison per workload, warm and cold L2](docs/speedup.svg)
 
 Ragged (jagged) batches, a packed `[N, D]` tensor plus `B+1` segment offsets,
 are how variable-length sequences, graph neighborhoods and recommendation
@@ -72,7 +77,8 @@ on the device.
   D, the longest segment and their skew, and runs the faster. Its
   coefficients are fitted on two seeds of the benchmark workloads
   (`bench/calibrate.py`, `results/bench/calibration/`) and evaluated on the
-  third ([docs/design-tradeoffs.md](docs/design-tradeoffs.md)). The longest
+  third and on seven shapes they were not fitted on
+  ([docs/design-tradeoffs.md](docs/design-tradeoffs.md)). The longest
   segment comes from the caller; without it the program classifies.
 - **Scheduling.** Each persistent worker grid is one resident wave of that
   kernel, measured with the occupancy API when the module loads (on an RTX
@@ -117,251 +123,99 @@ on the device.
 
 **Correctness.** Numerical results in the GPU tests and the benchmark are
 checked against a float64 NumPy oracle with dtype-specific tolerances
-(`oracle/reference.py`). On an RTX 4090 (driver 595.99, CUDA 13.2); the GPU
-and sanitizer runs are at the commit the benchmark measured
+(`oracle/reference.py`). On an RTX 4090 (driver 595.99, CUDA 13.2)
 ([results/tests/summary.txt](results/tests/summary.txt),
 [results/sanitizer/summary.txt](results/sanitizer/summary.txt)):
 
 | Suite | Result |
 |---|---|
-| GPU tests (`test/gpu`): every op, dtype, D in {1, 2, 6, 7, 12, 16, 24, 40, 128, 1024}, i32/i64 offsets, four length distributions, empty segments, masks, in-place, checked offsets, streams, CUDA graph capture, Driver API faults; both schedules of the adaptive program and its choice; vector access compared bitwise against one feature per thread, row pipelining and concurrent classes against the rolled, serial schedule; misaligned tensors rejected; online and three-pass softmax in every class, including 65,536-row segments; class queues read back for counts, membership and per-warp order; both Triton mappings and the CUDA and CUB comparisons | 2,132 passed; 164 FBGEMM cases skip (optional package not installed) |
-| compute-sanitizer memcheck, racecheck, initcheck and synccheck on the classified, mask, checked-offsets, scheduling, selection and per-class softmax suites (671 tests, one process per suite and tool; racecheck skips eight stream-ordering tests that queue large matmuls) | 0 errors, 0 hazards |
+| GPU tests (`test/gpu`): every op, dtype, D in {1, 2, 6, 7, 12, 16, 24, 40, 128, 1024}, i32/i64 offsets, four length distributions, empty segments, masks, in-place, checked offsets, streams, CUDA graph capture, Driver API faults; both schedules of the adaptive program and its choice; vector access compared bitwise against one feature per thread, row pipelining and concurrent classes against the rolled, serial schedule; misaligned tensors rejected; online and three-pass softmax in every class, including 65,536-row segments; class queues read back for counts, membership and per-warp order; the Triton, CUDA, CUB, cuSPARSE and FBGEMM comparisons | 2,170 passed; 30 strict xfails where FBGEMM's `jagged_softmax` returns NaN |
+| compute-sanitizer memcheck, racecheck, initcheck and synccheck on the classified, mask, checked-offsets, scheduling, selection and per-class softmax suites (671 tests, one process per suite and tool), at commit `f0bd690`; the generated GPU code is byte for byte the same since | 0 errors, 0 hazards |
 | lit/FileCheck tests of the dialect, passes and lowering (`test/`) | 41 passed |
-| host tests (`test/python`): cache, manifest validation, runtime contracts and stream schedule, cost model and schedule choice, benchmark harness, suite and summary | 1,163 passed |
+| host tests (`test/python`): cache, manifest validation, runtime contracts and stream schedule, cost model and schedule choice, benchmark harness, suite and summary | 1,173 passed; CI runs them on a CPU runner ([workflow](.github/workflows/host-tests.yml)), where the 118 that need the compiler or the CUDA library skip |
 
 **Speed.** Complete-call GPU time in µs: CUDA events around the call, so host
-launch gaps count. Each process times 30 calls after 5 warm-up calls; a cell
-is the median over 15 processes (seeds 711 to 713 of the length distribution,
-5 repetitions each) of each process's median, with the 25th to 75th
-percentile below it (`bench/suite.py`, `bench/summarize.py`,
-[results/bench/](results/bench/README.md)). f32 unless noted; 1M rows in
-16,384 segments at D=1, 262,144 rows in 4,096 segments at D=128; uniform
-(64 rows), long-tail (Pareto) and bursty lengths. **Warm** L2 is back-to-back
-calls; **cold** L2 overwrites a 288 MiB buffer and synchronizes before every
-call. Clocks are not locked: each run records `nvidia-smi` state (SM clock
-2,520 to 2,805 MHz over the suite), and the host ran other work at the same
-time. Each method passes the oracle before it is timed. The methods
-([baselines/README.md](baselines/README.md)):
+launch gaps count, median over 15 processes (seeds 711 to 713 of the length
+distribution × 5 repetitions) of each process's median of 30 calls. f32
+unless noted; 1M rows in 16,384 segments at D=1, 262,144 rows in 4,096
+segments at D=128; uniform (64 rows), long-tail (Pareto) and bursty lengths.
+**Warm** L2 is back-to-back calls; **cold** L2 overwrites a 288 MiB buffer and
+synchronizes before every call; **graph** replays a CUDA graph captured from
+one call, which runs the same kernels without the host's share of the call.
+`ragged` is the adaptive program, given the exact longest segment
+(`max_len`, the bound NJT also receives); *chose* is its schedule per seed
+711/712/713, C classification, N one block per segment. A result is a win
+when ragged takes less than 0.97 times the fastest comparison's time, a tie
+within 3%, a loss above. The comparisons ([baselines/README.md](baselines/README.md))
+are Triton autotuned on each input, CUB 3.5 (at D=128 on a transposed copy),
+cuSPARSE SpMM (sums), FBGEMM 1.9 (the D=1 sum and softmax),
+`torch.segment_reduce` (sum, max), compiled NJT with exact length bounds and
+a CUDA kernel with one block per segment. Clocks are not locked (SM clock
+2,520 to 2,805 MHz) and the GPU and host were shared with other work.
 
-- `ragged`: the adaptive program. Each call it runs device classification or
-  one block per segment, whichever the cost model predicts faster, given the
-  exact longest segment length (`max_len`), the bound NJT also receives.
-  *chose* lists the schedule per seed 711/712/713: C classification, N one
-  block per segment.
-- `ragged, classified`: the same program with classification forced
-  (`select="classified"`), which is also what it runs without `max_len`.
-- `ragged-naive`: this compiler with one block per segment (`strategy="naive"`).
-- `torch.segment_reduce` from PyTorch 2.14 (sum and max).
-- Triton 3.8: one program per segment, or segments cut into chunks of a
-  tuned row count with a combine kernel; online softmax. The first call on
-  each input times 8 (D=1) or 16 (D=128) configurations on that input and
-  keeps the fastest, which favors Triton.
-- CUB 3.5 `DeviceSegmentedReduce` at D=1; its softmax is CUB's max, an
-  element-parallel exp, CUB's sum and an element-parallel division.
-- A CUDA kernel with one 256-thread block per segment, threads over rows and
-  up to 32 feature columns.
-- NJT (`torch.nested`), compiled with `torch.compile(fullgraph=True)` and
-  eager, built with the exact minimum and maximum sequence lengths.
+| Op | D | Lengths | chose | ragged | fastest comparison | warm | cold | CUDA graph replay: ragged, fastest | graph |
+|---|---:|---|---|---:|---|---|---|---|---|
+| sum | 1 | uniform | N/N/N | 34 | torch.segment_reduce 15 | loss 2.19× | loss 1.71× vs torch.segment_reduce | 16, NJT compiled 5.4 | loss 3.06× |
+| sum | 1 | long tail | C/N/N | 35 | cuSPARSE 22 | loss 1.56× | loss 1.20× vs CUB | 17, Triton 16 | loss 1.07× |
+| sum | 1 | bursty | N/N/N | 33 | cuSPARSE 23 | loss 1.47× | loss 1.16× vs CUB | 16, Triton 13 | loss 1.27× |
+| sum | 128 | uniform | C/C/C | 136 | torch.segment_reduce 155 | win 0.87× | loss 1.23× vs NJT compiled | 102, NJT compiled 143 | win 0.71× |
+| sum | 128 | long tail | C/N/C | 193 | cuSPARSE 170 | loss 1.13× | loss 1.14× vs cuSPARSE | 173, cuSPARSE 160 | loss 1.08× |
+| sum | 128 | bursty | N/N/N | 169 | cuSPARSE 169 | tie 1.00× | tie 1.02× vs cuSPARSE | 151, Triton 152 | tie 1.00× |
+| max | 1 | uniform | N/N/N | 34 | torch.segment_reduce 15 | loss 2.19× | loss 2.00× vs torch.segment_reduce | 16, NJT compiled 5.4 | loss 3.02× |
+| max | 1 | long tail | C/N/N | 34 | Triton 31 | loss 1.11× | tie 1.03× vs CUB | 16, Triton 13 | loss 1.23× |
+| max | 1 | bursty | N/N/N | 34 | CUB 27 | loss 1.26× | loss 1.18× vs CUB | 16, Triton 12 | loss 1.35× |
+| max | 128 | uniform | C/C/C | 134 | torch.segment_reduce 156 | win 0.86× | loss 1.22× vs NJT compiled | 102, NJT compiled 143 | win 0.71× |
+| max | 128 | long tail | C/N/C | 181 | Triton 180 | tie 1.01× | loss 1.03× vs Triton | 165, Triton 163 | tie 1.01× |
+| max | 128 | bursty | N/N/N | 169 | Triton 169 | tie 1.00× | tie 0.99× vs Triton | 151, Triton 151 | tie 0.99× |
+| softmax | 1 | uniform | N/N/N | 36 | NJT compiled 45 | win 0.80× | win 0.89× vs NJT compiled | 18, NJT compiled 26 | win 0.72× |
+| softmax | 1 | long tail | C/N/C | 56 | Triton 65 | win 0.87× | loss 1.09× vs Triton | 34, Triton 46 | win 0.73× |
+| softmax | 1 | bursty | N/N/N | 37 | Triton 37 | tie 1.00× | loss 1.16× vs Triton | 18, Triton 19 | win 0.96× |
+| softmax | 128 | uniform | C/C/C | 311 | Triton 314 | tie 0.99× | loss 1.07× vs Triton | 288, Triton 296 | tie 0.97× |
+| softmax | 128 | long tail | C/C/C | 403 | Triton 392 | tie 1.03× | tie 1.02× vs Triton | 391, Triton 383 | tie 1.02× |
+| softmax | 128 | bursty | C/C/C | 504 | Triton 479 | loss 1.05× | loss 1.06× vs Triton | 474, Triton 463 | tie 1.02× |
+| softmax bf16 | 128 | long tail | C/C/C | 304 | Triton 221 | loss 1.38× | loss 1.31× vs Triton | 278, Triton 182 | loss 1.53× |
 
-Warm L2:
-
-| Op | D | Lengths | ragged | chose | ragged, classified | ragged-naive | torch.segment_reduce | Triton (tuned) | CUB | CUDA, block per segment | NJT compiled | NJT eager |
-|---|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| sum | 1 | uniform | 33 <sub>33–34</sub> | N/N/N | 48 <sub>48–49</sub> | 34 <sub>33–34</sub> | 15 <sub>15–15</sub> | 33 <sub>32–33</sub> | 30 <sub>30–30</sub> | 42 <sub>42–42</sub> | 28 <sub>28–29</sub> | 147 <sub>145–150</sub> |
-| sum | 1 | long tail | 35 <sub>34–46</sub> | C/N/N | 44 <sub>42–45</sub> | 34 <sub>34–83</sub> | 638 <sub>512–5,356</sub> | 33 <sub>32–69</sub> | 29 <sub>28–47</sub> | 42 <sub>40–165</sub> | 284 <sub>238–2,176</sub> | 10,178 <sub>9,032–11,273</sub> (10 runs) |
-| sum | 1 | bursty | 33 <sub>33–33</sub> | N/N/N | 39 <sub>39–39</sub> | 32 <sub>31–33</sub> | 235 <sub>229–240</sub> | 30 <sub>30–30</sub> | 25 <sub>25–25</sub> | 38 <sub>38–39</sub> | 75 <sub>75–77</sub> | 2,232 <sub>2,230–2,235</sub> |
-| sum | 128 | uniform | 130 <sub>129–132</sub> | C/C/C | 132 <sub>130–136</sub> | 167 <sub>167–168</sub> | 155 <sub>155–156</sub> | 167 <sub>167–168</sub> | – | 161 <sub>161–161</sub> | 163 <sub>163–163</sub> | 565 <sub>562–567</sub> |
-| sum | 128 | long tail | 189 <sub>189–193</sub> | C/N/C | 191 <sub>187–192</sub> | 196 <sub>189–199</sub> | 661 <sub>570–719</sub> | 185 <sub>184–185</sub> | – | 1,188 <sub>1,011–1,285</sub> | 1,114 <sub>1,009–1,126</sub> | fails |
-| sum | 128 | bursty | 168 <sub>168–169</sub> | N/N/N | 180 <sub>179–181</sub> | 169 <sub>168–169</sub> | 482 <sub>476–484</sub> | 171 <sub>170–171</sub> | – | 914 <sub>911–915</sub> | 757 <sub>756–817</sub> | fails |
-| max | 1 | uniform | 33 <sub>33–33</sub> | N/N/N | 48 <sub>48–48</sub> | 33 <sub>33–33</sub> | 15 <sub>15–15</sub> | 31 <sub>30–31</sub> | 32 <sub>32–32</sub> | 42 <sub>41–42</sub> | 29 <sub>28–29</sub> | 114 <sub>113–116</sub> |
-| max | 1 | long tail | 34 <sub>33–43</sub> | C/N/N | 42 <sub>42–43</sub> | 34 <sub>33–53</sub> | 459 <sub>353–3,790</sub> | 30 <sub>29–49</sub> | 31 <sub>30–52</sub> | 42 <sub>40–158</sub> | 311 <sub>266–2,299</sub> | 10,138 <sub>9,029–10,857</sub> (10 runs) |
-| max | 1 | bursty | 33 <sub>32–33</sub> | N/N/N | 39 <sub>39–40</sub> | 33 <sub>33–34</sub> | 158 <sub>112–159</sub> | 29 <sub>28–29</sub> | 26 <sub>25–26</sub> | 38 <sub>38–38</sub> | 82 <sub>81–83</sub> | 2,208 <sub>2,206–2,210</sub> |
-| max | 128 | uniform | 132 <sub>130–138</sub> | C/C/C | 133 <sub>130–134</sub> | 168 <sub>167–168</sub> | 156 <sub>155–156</sub> | 167 <sub>166–168</sub> | – | 161 <sub>161–161</sub> | 162 <sub>162–163</sub> | 536 <sub>535–538</sub> |
-| max | 128 | long tail | 183 <sub>181–186</sub> | C/N/C | 180 <sub>178–181</sub> | 192 <sub>188–197</sub> | 324 <sub>291–340</sub> | 181 <sub>179–181</sub> | – | 1,140 <sub>990–1,230</sub> | 1,139 <sub>1,138–1,230</sub> | fails |
-| max | 128 | bursty | 167 <sub>167–168</sub> | N/N/N | 180 <sub>179–181</sub> | 168 <sub>167–169</sub> | 266 <sub>222–266</sub> | 170 <sub>169–170</sub> | – | 901 <sub>899–903</sub> | 910 <sub>908–926</sub> | fails |
-| softmax | 1 | uniform | 35 <sub>35–36</sub> | N/N/N | 55 <sub>54–55</sub> | 35 <sub>35–36</sub> | – | 46 <sub>46–46</sub> | 75 <sub>75–75</sub> | 59 <sub>59–59</sub> | 47 <sub>47–48</sub> | 164 <sub>162–167</sub> |
-| softmax | 1 | long tail | 54 <sub>51–81</sub> | C/N/C | 54 <sub>53–81</sub> | 56 <sub>51–263</sub> | – | 65 <sub>62–93</sub> | 72 <sub>71–110</sub> | 84 <sub>74–494</sub> | 677 <sub>563–5,418</sub> | 12,566 <sub>11,017–13,504</sub> (10 runs) |
-| softmax | 1 | bursty | 36 <sub>35–37</sub> | N/N/N | 46 <sub>46–47</sub> | 36 <sub>35–37</sub> | – | 36 <sub>35–39</sub> | 62 <sub>61–62</sub> | 54 <sub>54–54</sub> | 167 <sub>166–167</sub> | 2,649 <sub>2,646–2,656</sub> |
-| softmax | 128 | uniform | 310 <sub>308–312</sub> | C/C/C | 310 <sub>309–311</sub> | 321 <sub>320–321</sub> | – | 314 <sub>313–315</sub> | – | 314 <sub>313–314</sub> | 458 <sub>457–458</sub> | 1,194 <sub>1,193–1,195</sub> |
-| softmax | 128 | long tail | 403 <sub>401–409</sub> | C/C/C | 404 <sub>399–406</sub> | 485 <sub>461–506</sub> | – | 392 <sub>385–392</sub> | – | 2,438 <sub>2,071–2,700</sub> | 4,436 <sub>3,703–4,715</sub> | fails |
-| softmax | 128 | bursty | 506 <sub>505–507</sub> | C/C/C | 506 <sub>504–506</sub> | 506 <sub>505–508</sub> | – | 479 <sub>478–480</sub> | – | 1,937 <sub>1,926–1,944</sub> | 3,428 <sub>3,424–3,438</sub> | fails |
-| softmax bf16 | 128 | long tail | 305 <sub>300–309</sub> | C/C/C | 302 <sub>294–307</sub> | 459 <sub>427–472</sub> | – | 220 <sub>220–222</sub> | – | 2,872 <sub>2,486–3,144</sub> | 4,264 <sub>3,785–4,791</sub> | fails |
-
-Cold L2:
-
-| Op | D | Lengths | ragged | chose | ragged, classified | ragged-naive | torch.segment_reduce | Triton (tuned) | CUB | CUDA, block per segment | NJT compiled | NJT eager |
-|---|---:|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| sum | 1 | uniform | 36 <sub>36–37</sub> | N/N/N | 55 <sub>54–56</sub> | 36 <sub>36–37</sub> | 22 <sub>21–22</sub> | 34 <sub>34–35</sub> | 34 <sub>34–34</sub> | 45 <sub>45–45</sub> | 31 <sub>30–32</sub> | 152 <sub>150–153</sub> |
-| sum | 1 | long tail | 45 <sub>42–63</sub> | C/N/N | 54 <sub>54–63</sub> | 44 <sub>42–131</sub> | 1,208 <sub>986–9,560</sub> | 44 <sub>42–80</sub> | 35 <sub>35–74</sub> | 61 <sub>55–316</sub> | 287 <sub>239–2,192</sub> | 9,851 <sub>8,870–10,878</sub> (10 runs) |
-| sum | 1 | bursty | 37 <sub>37–38</sub> | N/N/N | 50 <sub>50–51</sub> | 37 <sub>37–38</sub> | 519 <sub>517–528</sub> | 35 <sub>33–35</sub> | 32 <sub>31–32</sub> | 42 <sub>41–43</sub> | 79 <sub>77–80</sub> | 2,230 <sub>2,168–2,241</sub> |
-| sum | 128 | uniform | 229 <sub>229–230</sub> | C/C/C | 229 <sub>228–230</sub> | 218 <sub>218–219</sub> | 207 <sub>207–207</sub> | 219 <sub>218–219</sub> | – | 212 <sub>212–213</sub> | 189 <sub>189–190</sub> | 620 <sub>615–621</sub> |
-| sum | 128 | long tail | 248 <sub>241–252</sub> | C/N/C | 249 <sub>244–251</sub> | 247 <sub>241–251</sub> | 718 <sub>624–779</sub> | 236 <sub>235–236</sub> | – | 1,236 <sub>1,062–1,337</sub> | 1,121 <sub>1,026–1,130</sub> | fails |
-| sum | 128 | bursty | 224 <sub>223–224</sub> | N/N/N | 232 <sub>232–233</sub> | 223 <sub>223–224</sub> | 538 <sub>530–538</sub> | 225 <sub>225–226</sub> | – | 961 <sub>960–962</sub> | 758 <sub>757–827</sub> | fails |
-| max | 1 | uniform | 36 <sub>36–37</sub> | N/N/N | 56 <sub>55–56</sub> | 36 <sub>36–37</sub> | 18 <sub>18–18</sub> | 33 <sub>33–34</sub> | 36 <sub>36–36</sub> | 45 <sub>45–45</sub> | 31 <sub>31–32</sub> | 118 <sub>117–120</sub> |
-| max | 1 | long tail | 39 <sub>39–59</sub> | C/N/N | 54 <sub>52–59</sub> | 40 <sub>39–80</sub> | 783 <sub>621–6,242</sub> | 43 <sub>41–76</sub> | 37 <sub>36–79</sub> | 60 <sub>55–311</sub> | 312 <sub>268–2,319</sub> | 9,827 <sub>8,838–10,800</sub> (10 runs) |
-| max | 1 | bursty | 38 <sub>38–39</sub> | N/N/N | 51 <sub>50–51</sub> | 39 <sub>38–39</sub> | 225 <sub>214–227</sub> | 34 <sub>34–35</sub> | 33 <sub>32–34</sub> | 42 <sub>41–43</sub> | 85 <sub>83–86</sub> | 2,214 <sub>2,211–2,217</sub> |
-| max | 128 | uniform | 229 <sub>228–229</sub> | C/C/C | 228 <sub>227–229</sub> | 218 <sub>218–219</sub> | 205 <sub>205–205</sub> | 218 <sub>218–219</sub> | – | 213 <sub>212–213</sub> | 189 <sub>189–189</sub> | 588 <sub>588–590</sub> |
-| max | 128 | long tail | 238 <sub>237–239</sub> | C/N/C | 236 <sub>235–238</sub> | 244 <sub>239–248</sub> | 375 <sub>341–394</sub> | 232 <sub>230–233</sub> | – | 1,182 <sub>1,047–1,283</sub> | 1,162 <sub>1,161–1,247</sub> | fails |
-| max | 128 | bursty | 223 <sub>223–224</sub> | N/N/N | 232 <sub>232–233</sub> | 223 <sub>223–224</sub> | 289 <sub>266–290</sub> | 225 <sub>224–226</sub> | – | 950 <sub>949–951</sub> | 918 <sub>910–927</sub> | fails |
-| softmax | 1 | uniform | 41 <sub>40–41</sub> | N/N/N | 66 <sub>65–66</sub> | 41 <sub>41–41</sub> | – | 47 <sub>47–48</sub> | 77 <sub>76–77</sub> | 60 <sub>60–60</sub> | 48 <sub>48–49</sub> | 165 <sub>163–168</sub> |
-| softmax | 1 | long tail | 70 <sub>69–101</sub> | C/N/C | 70 <sub>68–100</sub> | 78 <sub>70–351</sub> | – | 69 <sub>65–95</sub> | 80 <sub>73–110</sub> | 84 <sub>80–497</sub> | 678 <sub>567–5,267</sub> | 12,264 <sub>11,000–13,537</sub> (10 runs) |
-| softmax | 1 | bursty | 45 <sub>44–47</sub> | N/N/N | 63 <sub>61–64</sub> | 45 <sub>43–47</sub> | – | 37 <sub>37–41</sub> | 64 <sub>63–65</sub> | 55 <sub>55–55</sub> | 169 <sub>168–169</sub> | 2,656 <sub>2,646–2,658</sub> |
-| softmax | 128 | uniform | 346 <sub>346–347</sub> | C/C/C | 346 <sub>346–347</sub> | 331 <sub>331–331</sub> | – | 324 <sub>324–324</sub> | – | 331 <sub>330–331</sub> | 477 <sub>477–478</sub> | 1,222 <sub>1,220–1,223</sub> |
-| softmax | 128 | long tail | 422 <sub>419–429</sub> | C/C/C | 423 <sub>421–432</sub> | 507 <sub>481–528</sub> | – | 412 <sub>404–413</sub> | – | 2,463 <sub>2,095–2,732</sub> | 4,089 <sub>3,718–4,475</sub> | fails |
-| softmax | 128 | bursty | 518 <sub>517–520</sub> | C/C/C | 519 <sub>518–520</sub> | 521 <sub>520–522</sub> | – | 491 <sub>490–494</sub> | – | 1,956 <sub>1,950–1,975</sub> | 3,419 <sub>3,142–3,424</sub> | fails |
-| softmax bf16 | 128 | long tail | 326 <sub>318–333</sub> | C/C/C | 329 <sub>318–334</sub> | 474 <sub>443–485</sub> | – | 247 <sub>245–248</sub> | – | 2,889 <sub>2,500–3,159</sub> | 3,989 <sub>3,798–4,364</sub> | fails |
-
-On the long tail the seed sets the longest segment: 300,412 rows for seed
-711 at D=1 and 29,049 and 35,765 for the others, so the upper quartile of a
-D=1 long-tail cell is mostly seed 711. `summary.json` lists every seed's
-median and chosen schedule.
+Every method's time in every state, the earlier run with eager NJT and the
+forced classified schedule, the ablations, vector access, length hints, the
+cost model on held-out shapes and the kernel traces are in
+[results/bench/README.md](results/bench/README.md).
 
 What the numbers say:
 
-- **Classification alone loses to one block per segment in 10 of 19 warm
-  workloads (14 cold); the per-call choice removes those losses.** Forced
-  classification is 19 to 55% slower on every D=1 workload but the long-tail
-  softmax, and 7% slower on the bursty D=128 sum and max. The traces
-  (`results/bench/profile.txt`) show why: on the uniform D=1 sum the
-  classified GPU span is 30 µs (classify 6.5, the CTA workers 18.7, and the
-  empty warp and split chains 2.7 to 2.8 µs each) against one 14.8 µs kernel,
-  and its host side takes 24 µs against 14 (`results/bench/host.txt`: six
-  launches, a stream fork and a join instead of one launch). On the bursty
-  D=128 sum the 40 long segments already fill 160 blocks of one block per
-  segment (149 µs), so splitting them (147 µs) buys nothing and the prologue
-  and the warp chain beside it are extra. Classification wins where many
-  short blocks or one long block hurt: the uniform D=128 sum, whose 16,384
-  short blocks take 149 µs against 101 µs for persistent CTA workers, and
-  long segments, such as seed 711's 300,412-row D=1 segment (sum 46 µs
-  against 84, softmax 82 against 264).
-- **The choice stays within noise of block per segment with a warm L2.**
-  Over all 15 runs the adaptive median is at most 1.4% above `ragged-naive`
-  (D=1 bursty sum, 32.7 against 32.3 µs, the same kernel); on the held-out
-  seed 713 at most 1.1% (`results/bench/calibration/evaluation.txt`). Where it
-  classifies it is 17 to 34% faster than block per segment on the uniform
-  D=128 sum and max and the long-tail D=128 softmax (f32 and bf16).
-- **With a cold L2 it is up to 5% slower than block per segment on uniform
-  D=128 inputs.** The model is calibrated on warm times, where classification
-  wins those three workloads (sum 130 against 167 µs); cold, block per
-  segment is faster (sum 218 against 229, max 218 against 229, softmax 331
-  against 346), and the model still classifies.
-- **The cold D=128 uniform sum still reads at 0.59 TB/s, mostly because of
-  the flush.** It takes 229 µs (block per segment 218) against 133 µs for
-  reading 128 MiB at 1.01 TB/s. The benchmark's flush leaves the L2 full of
-  dirty lines, which are written back while the call reads: after a flush
-  that only reads, the same call takes 175 µs classified and 163 µs (0.82
-  TB/s, host time included) block per segment, and `torch.segment_reduce` 152
-  instead of 206 (`results/bench/cold-l2.txt`). Vector loads did not change
-  the cold time (227 µs scalar). Compiled NJT stays the fastest cold
-  uniform D=128 sum and max (189 µs).
-- **Vector access helps block per segment and the f32 classified softmax,
-  and hurts bf16.** With 16-byte accesses and four times the row lanes per
-  block, one block per segment takes 196 µs instead of 236 on the long-tail
-  D=128 sum, 485 instead of 572 on the long-tail softmax and 506 instead of
-  534 on the bursty softmax; classification takes 404 instead of 437 on the
-  long-tail softmax; elsewhere both schedules are within 4% of one feature
-  per thread. On the bf16 long-tail softmax, where a thread owns eight
-  features and its online CTA kernel needs 159 registers instead of 45 (3 blocks
-  per SM), it is slower: 302 µs classified against 264 µs with one feature
-  per thread, and block per segment 459 against 442.
-- **The comparisons still win at D=1 and on skewed D=128 inputs.**
-  `torch.segment_reduce` takes 15 µs on uniform sum and max, where ragged
-  takes 33; CUB takes 25 to 29 µs on the long-tail and bursty sum and the
-  bursty max (ragged 33 to 35), Triton 30 µs on the long-tail max (34) and
-  36 on the bursty softmax (ragged 36, 1% slower). Tuned Triton is 1 to 6%
-  faster on the long-tail D=128 sum, max and softmax and the bursty
-  softmax, and 1.38 times faster on the bf16 long-tail softmax (220 against
-  305 µs). ragged
-  beats every comparison on the uniform D=128 sum, max and softmax, the
-  bursty D=128 sum and max, and the uniform and long-tail D=1 softmax.
-- **Length hints** are now mostly redundant: exact bounds still compile the
-  uniform D=128 sum to one CTA class, which is block per segment (167 µs
-  against 130), and the per-call choice already gives the D=1 workloads the
-  block-per-segment time.
-- **NJT** with exact sequence lengths compiles to fast code for uniform
-  lengths (28 µs for the D=1 sum, the fastest cold D=128 uniform sum and max)
-  and is 2 to 14 times slower than ragged on skewed ones. Eager NJT pads to the
-  longest segment: it fails on an int32 index limit for skewed D=128 inputs
-  and for seed 711 at D=1, and takes 0.1 to 12.6 ms elsewhere.
-
-**Ablations**, warm, µs (`results/bench/runs/ablation/`), each turning off
-one optimization of the classified schedule in the same build:
-`--disable-optimization online_fusion` (three passes in every class),
-`--disable-optimization row_pipelining` and `--serial-classes`:
-
-| Workload | ragged, classified | three passes in every class | rows not pipelined | classes serial |
-|---|---:|---:|---:|---:|
-| sum, D=1, uniform | 48 <sub>48–49</sub> | – | 49 <sub>48–49</sub> | 55 <sub>55–56</sub> |
-| sum, D=1, long tail | 44 <sub>42–45</sub> | – | 44 <sub>43–49</sub> | 49 <sub>49–50</sub> |
-| sum, D=1, bursty | 39 <sub>39–39</sub> | – | 39 <sub>39–40</sub> | 42 <sub>42–43</sub> |
-| sum, D=128, uniform | 132 <sub>130–136</sub> | – | 134 <sub>130–136</sub> | 136 <sub>135–137</sub> |
-| sum, D=128, long tail | 191 <sub>187–192</sub> | – | 192 <sub>189–195</sub> | 202 <sub>198–203</sub> |
-| sum, D=128, bursty | 180 <sub>179–181</sub> | – | 182 <sub>182–182</sub> | 184 <sub>183–185</sub> |
-| max, D=1, uniform | 48 <sub>48–48</sub> | – | 48 <sub>48–49</sub> | 55 <sub>55–56</sub> |
-| max, D=1, long tail | 42 <sub>42–43</sub> | – | 44 <sub>43–48</sub> | 49 <sub>49–50</sub> |
-| max, D=1, bursty | 39 <sub>39–40</sub> | – | 40 <sub>39–40</sub> | 43 <sub>43–43</sub> |
-| max, D=128, uniform | 133 <sub>130–134</sub> | – | 134 <sub>132–136</sub> | 136 <sub>134–137</sub> |
-| max, D=128, long tail | 180 <sub>178–181</sub> | – | 189 <sub>187–190</sub> | 189 <sub>187–189</sub> |
-| max, D=128, bursty | 180 <sub>179–181</sub> | – | 181 <sub>181–182</sub> | 183 <sub>183–184</sub> |
-| softmax, D=1, uniform | 55 <sub>54–55</sub> | 79 <sub>79–80</sub> | 53 <sub>52–53</sub> | 60 <sub>60–61</sub> |
-| softmax, D=1, long tail | 54 <sub>53–81</sub> | 68 <sub>67–89</sub> | 55 <sub>54–107</sub> | 65 <sub>63–92</sub> |
-| softmax, D=1, bursty | 46 <sub>46–47</sub> | 59 <sub>58–59</sub> | 48 <sub>47–48</sub> | 53 <sub>52–53</sub> |
-| softmax, D=128, uniform | 310 <sub>309–311</sub> | 624 <sub>623–624</sub> | 310 <sub>309–312</sub> | 321 <sub>320–322</sub> |
-| softmax, D=128, long tail | 404 <sub>399–406</sub> | 631 <sub>629–633</sub> | 493 <sub>479–508</sub> | 451 <sub>442–457</sub> |
-| softmax, D=128, bursty | 506 <sub>504–506</sub> | 651 <sub>651–653</sub> | 505 <sub>504–506</sub> | 511 <sub>510–512</sub> |
-| softmax bf16, D=128, long tail | 302 <sub>294–307</sub> | – | – | – |
-
-Online statistics are faster in every softmax workload: three passes take
-26 to 101% longer. Concurrent class chains are faster in every f32 workload:
-serial chains take 1 to 20% longer. Row pipelining helps the long-tail
-D=128 workloads most (max 189 against 180 µs, softmax 493 against 404) and is
-slower in three: the uniform D=1 softmax by 3%, the uniform and bursty D=128
-softmax by 0.1 to 0.2%.
-
-**Vector access** (`--disable-optimization vectorize`, both schedules, D=128),
-µs:
-
-| Workload | classified | classified, scalar | naive | naive, scalar |
-|---|---:|---:|---:|---:|
-| sum, D=128, uniform, warm | 132 <sub>130–136</sub> | 135 <sub>130–138</sub> | 167 <sub>167–168</sub> | 166 <sub>166–166</sub> |
-| sum, D=128, uniform, cold | 229 <sub>228–230</sub> | 227 <sub>227–228</sub> | 218 <sub>218–219</sub> | 216 <sub>216–217</sub> |
-| sum, D=128, long tail, warm | 191 <sub>187–192</sub> | 195 <sub>192–196</sub> | 196 <sub>189–199</sub> | 236 <sub>223–244</sub> |
-| sum, D=128, long tail, cold | 249 <sub>244–251</sub> | 251 <sub>248–254</sub> | 247 <sub>241–251</sub> | 289 <sub>274–298</sub> |
-| sum, D=128, bursty, warm | 180 <sub>179–181</sub> | 181 <sub>180–181</sub> | 169 <sub>168–169</sub> | 170 <sub>170–171</sub> |
-| sum, D=128, bursty, cold | 232 <sub>232–233</sub> | 231 <sub>231–232</sub> | 223 <sub>223–224</sub> | 226 <sub>226–227</sub> |
-| max, D=128, uniform, warm | 133 <sub>130–134</sub> | 138 <sub>132–140</sub> | 168 <sub>167–168</sub> | 166 <sub>166–166</sub> |
-| max, D=128, uniform, cold | 228 <sub>227–229</sub> | 227 <sub>227–228</sub> | 218 <sub>218–219</sub> | 215 <sub>215–216</sub> |
-| max, D=128, long tail, warm | 180 <sub>178–181</sub> | 184 <sub>182–186</sub> | 192 <sub>188–197</sub> | 195 <sub>188–198</sub> |
-| max, D=128, long tail, cold | 236 <sub>235–238</sub> | 241 <sub>239–243</sub> | 244 <sub>239–248</sub> | 247 <sub>241–250</sub> |
-| max, D=128, bursty, warm | 180 <sub>179–181</sub> | 181 <sub>181–181</sub> | 168 <sub>167–169</sub> | 167 <sub>166–168</sub> |
-| max, D=128, bursty, cold | 232 <sub>232–233</sub> | 232 <sub>231–233</sub> | 223 <sub>223–224</sub> | 222 <sub>222–223</sub> |
-| softmax, D=128, uniform, warm | 310 <sub>309–311</sub> | 314 <sub>313–315</sub> | 321 <sub>320–321</sub> | 335 <sub>335–336</sub> |
-| softmax, D=128, uniform, cold | 346 <sub>346–347</sub> | 346 <sub>346–347</sub> | 331 <sub>331–331</sub> | 343 <sub>343–344</sub> |
-| softmax, D=128, long tail, warm | 404 <sub>399–406</sub> | 437 <sub>429–443</sub> | 485 <sub>461–506</sub> | 572 <sub>528–598</sub> |
-| softmax, D=128, long tail, cold | 423 <sub>421–432</sub> | 458 <sub>451–472</sub> | 507 <sub>481–528</sub> | 593 <sub>551–622</sub> |
-| softmax, D=128, bursty, warm | 506 <sub>504–506</sub> | 506 <sub>506–510</sub> | 506 <sub>505–508</sub> | 534 <sub>523–549</sub> |
-| softmax, D=128, bursty, cold | 519 <sub>518–520</sub> | 518 <sub>517–520</sub> | 521 <sub>520–522</sub> | 542 <sub>534–593</sub> |
-| softmax bf16, D=128, long tail, warm | 302 <sub>294–307</sub> | 264 <sub>260–275</sub> | 459 <sub>427–472</sub> | 442 <sub>396–469</sub> |
-| softmax bf16, D=128, long tail, cold | 329 <sub>318–334</sub> | 301 <sub>299–319</sub> | 474 <sub>443–485</sub> | 469 <sub>425–498</sub> |
-
-**Length hints** (`--length-hints`, exact bounds), warm, µs:
-
-| Workload | ragged | ragged with exact length hints | classes with hints | ragged-naive |
-|---|---:|---:|---|---:|
-| softmax, D=1, uniform | 35 <sub>35–36</sub> | 36 <sub>35–36</sub> | cta | 35 <sub>35–36</sub> |
-| softmax, D=128, uniform | 310 <sub>308–312</sub> | 321 <sub>321–321</sub> | cta | 321 <sub>320–321</sub> |
-| sum, D=1, long tail | 35 <sub>34–46</sub> | 35 <sub>34–46</sub> | warp+cta+split | 34 <sub>34–83</sub> |
-| sum, D=1, uniform | 33 <sub>33–34</sub> | 33 <sub>33–33</sub> | cta | 34 <sub>33–34</sub> |
-| sum, D=128, long tail | 189 <sub>189–193</sub> | 193 <sub>191–194</sub> | warp+cta+split | 196 <sub>189–199</sub> |
-| sum, D=128, uniform | 130 <sub>129–132</sub> | 167 <sub>167–168</sub> | cta | 167 <sub>167–168</sub> |
-
-**Kernel traces** (`results/bench/profile.txt`, seed 711). With uniform
-lengths at D=128 every 64-row segment is in the CTA class, whose online
-softmax kernel takes 281 µs warm to read and write 128 MiB each. On the D=128
-long-tail softmax the CTA, warp and split classes take 291, 68 and 39 µs run
-one after another; concurrently the call's GPU span is 398 µs instead of 428,
-although every kernel runs longer while they share the GPU. Cold, the CTA
-kernel of the uniform D=128 sum takes 200 µs against 101 warm.
+- **At D=1 the sum and max lose, and not only to host time.** A warm call
+  takes 33 to 35 µs, of which the kernel is 14.4 to 14.8 µs
+  ([profile.txt](results/bench/profile.txt), [burst-gap](results/bench/README.md#seed-711s-bursty-d1-sum));
+  replayed as a graph it takes 16 to 17 µs. The comparisons gain as much from replay:
+  `torch.segment_reduce` takes 11 µs, Triton 12 to 16, and compiled NJT 5.4
+  µs on uniform lengths, where exact bounds turn it into a dense reduction.
+  One block per segment over 16,384 short segments is slower than their
+  kernels, not only their launch path.
+- **cuSPARSE is the strongest comparison for sums.** Its SpMM takes 22 to 23
+  µs at D=1 and 169 to 170 µs at D=128 for every length distribution, 1.13
+  times faster than ragged on the long-tail D=128 sum; on graph replay it
+  is slower than ragged at D=1 (22 against 16 to 17 µs). CUB at D=128 needs a
+  transpose and D·B segments and takes 1.2 to 4.2 ms; FBGEMM's D=1 sum takes
+  26 to 55 µs and its `jagged_softmax` 74 µs to 2.9 ms.
+- **ragged wins where its mapping matters.** On the uniform D=128 sum and max,
+  persistent CTA workers take 134 to 136 µs against 155 for
+  `torch.segment_reduce` (102 against 143 for compiled NJT on graph replay);
+  on the D=1 softmax its one-pass online statistics beat compiled NJT and
+  Triton by 13 to 20%.
+- **With a cold L2 it mostly loses.** Compiled NJT is 1.2 times faster on the
+  uniform D=128 sum and max (187 against 230 µs), cuSPARSE 1.14 times on the
+  long-tail D=128 sum, Triton 1.06 to 1.31 times on the uniform, bursty and
+  bf16 D=128 softmax, CUB 1.2 times on the D=1 sums. The benchmark's flush leaves the L2 full of dirty lines,
+  which every method pays to write back ([results/bench/cold-l2.txt](results/bench/cold-l2.txt)).
+- **Classification versus one block per segment.** Forced classification
+  loses to block per segment in 10 of 19 warm workloads, and the per-call
+  choice removes those losses on the benchmark shapes (at most 1.4% above
+  `ragged-naive` over the 15 runs warm). That evaluation is weak: the seed
+  changes the lengths of only the 7 long-tail workloads. On seven shapes the
+  model was not fitted on, the choice is within 3% of the faster schedule for
+  115 of 189 inputs warm and 101 cold; it always runs block per segment at
+  D=1 with 65,536 segments (12 to 115% slower than classification there) and
+  classifies the uniform D=32 and D=64 sum and max (35 to 41% slower than
+  block per segment).
 
 ## Build and run
 
@@ -392,17 +246,20 @@ above writes a new one under `build/`; compare it with
 `results/bench/runs/main/softmax-bf16-d128-long_tail/seed-711/`. The
 `cuda-naive` and `cub` methods need the comparison library that
 `baselines/README.md` shows how to build. The cost model's calibration, the
-whole suite (1,155 processes), its summary, the held-out evaluation and the
-chart:
+main suite (1,155 processes), the comparison and held-out-shape groups, the
+summary, the held-out evaluations and the chart:
 
 ```sh
 python -m bench.suite --groups main --seeds 711 712 --methods ragged-classified ragged-naive \
     --output build/calibration --lock /var/tmp/gpu.lock --lock-batch 600
 python -m bench.calibrate fit build/calibration --train 711 712 --output python/ragged/cost_model.json
 python -m bench.suite --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
+python -m bench.suite --groups compare --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
+python -m bench.suite --groups heldout --repetitions 3 --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
 python -m bench.summarize build/runs --output build/summary.json
 python -m bench.calibrate evaluate build/runs --seeds 713
-python -m bench.chart build/summary.json --output build/speedup.svg
+python -m bench.calibrate evaluate build/runs --group heldout --seeds 711 712 713
+python -m bench.chart build/summary.json --group compare --output build/speedup.svg
 ```
 
 ## Limitations
@@ -418,8 +275,10 @@ python -m bench.chart build/summary.json --output build/speedup.svg
 - The cost model is linear in six terms and calibrated on warm times of the
   benchmark's 19 workloads (two shapes, three length distributions) on one
   GPU. With a cold L2 it picks classification for the uniform D=128 inputs
-  where block per segment is 5% faster; other shapes, distributions and GPUs
-  are not calibrated.
+  where block per segment is 5% faster. On seven held-out shapes it picks the
+  slower schedule by more than 3% for 74 of 189 inputs
+  ([results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes));
+  other distributions and GPUs are untested.
 - Segment-class bounds (32 and 4,096 rows) and the 8-way split are fixed in the
   compiler and the classified ABI, not tuned per GPU or per D.
 - Vector access makes the bf16 long-tail softmax slower (302 against 264 µs
@@ -428,14 +287,18 @@ python -m bench.chart build/summary.json --output build/speedup.svg
 - Host time is 24 to 26 µs per classified call and 14 to 15 µs per
   block-per-segment call (`results/bench/host.txt`): tensor validation,
   descriptor construction and the scratch allocation in Python, then one
-  native call. `torch.segment_reduce` and CUB remain faster at D=1.
+  native call. At D=1 CUB, cuSPARSE, Triton and, on uniform lengths,
+  `torch.segment_reduce` are faster; on CUDA-graph replay, without host
+  time, Triton still is, and so are `torch.segment_reduce` and compiled NJT
+  on uniform lengths.
 - The online fold is one dependency chain per lane. When few segments are
   long, as for the split class of the long-tail inputs, its kernel is bound by
   latency rather than bandwidth. Recentering once per batch of eight pipelined
   rows would shorten the chain, but would change results against the rolled
   loop, which row pipelining now reproduces bit for bit.
-- Tuned Triton is 1 to 6% faster on skewed D=128 f32 inputs and 1.38 times
-  faster on the bf16 long-tail softmax.
+- Tuned Triton is 1 to 5% faster on skewed D=128 f32 inputs and 1.38 times
+  faster on the bf16 long-tail softmax; cuSPARSE is 1.13 times faster on the
+  long-tail D=128 sum.
 - With a cold L2 the D=128 uniform sum reads its input at 0.59 TB/s. Most of
   the gap to DRAM bandwidth is the write-back of the dirty lines the
   benchmark's flush leaves in the L2 (`results/bench/cold-l2.txt`), which
@@ -450,7 +313,7 @@ python -m bench.chart build/summary.json --output build/speedup.svg
 - One GPU (an RTX 4090 that also drives a desktop and is shared with other
   projects), unlocked clocks, and a host running other work; synthetic length
   distributions plus three seeds. The Triton reference is tuned on each
-  benchmark input, but FBGEMM and `torch_scatter` are not measured.
+  benchmark input; `torch_scatter` is not measured.
 
 ## Layout
 
