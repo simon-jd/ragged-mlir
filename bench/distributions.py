@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 
-DISTRIBUTIONS = ("uniform", "long_tail", "bimodal", "burst")
+DISTRIBUTIONS = ("uniform", "long_tail", "bimodal", "burst", "exponential")
 
 
 def make_lengths(distribution: str, segments: int, *, seed: int = 0,
@@ -32,6 +32,10 @@ def make_lengths(distribution: str, segments: int, *, seed: int = 0,
         weights = np.minimum(rng.pareto(1.3, segments) + 1, 100000.0)
     elif distribution == "bimodal":
         weights = np.where(rng.random(segments) < 0.9, 4.0, 1024.0)
+    elif distribution == "exponential":
+        # Geometric-like lengths: many short segments, a longest one about
+        # ln(B) times the mean, skew between uniform and the Pareto tail.
+        weights = rng.exponential(1.0, segments)
     else:
         weights = np.ones(segments)
         width = max(1, segments // 100)

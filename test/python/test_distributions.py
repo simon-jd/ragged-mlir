@@ -28,6 +28,6 @@ def test_empty_and_overflow_validation():
 
 
 def test_long_tail_and_burst_are_not_uniform():
-    for distribution in ("long_tail", "bimodal", "burst"):
+    for distribution in ("long_tail", "bimodal", "burst", "exponential"):
         lengths = make_lengths(distribution, 16384, seed=42, total_elements=1_000_000)
         assert lengths.max() > 8 * np.median(lengths)

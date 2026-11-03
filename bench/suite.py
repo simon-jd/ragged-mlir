@@ -41,6 +41,13 @@ COMPARE_METHODS = ("ragged-auto", "ragged-naive", "torch-segment", "njt-compile"
 # 64 rows per segment on average; these change D, or B at the same N.
 HELDOUT_SHAPES = ((1, 4096, 1048576), (1, 65536, 1048576), (32, 8192, 524288), (64, 4096, 262144),
                   (128, 1024, 262144), (128, 16384, 262144), (256, 2048, 131072))
+# A second held-out set, fixed after the first one was used to change the
+# model and before the changed model was run: segment and row counts that
+# no earlier group used, D from 1 to 512 (only D=1 seen before), 10 to 256
+# rows on average, and length distributions no earlier group measured.
+HELDOUT2_SHAPES = ((1, 200000, 3200000), (2, 32768, 2097152), (8, 131072, 1310720), (16, 12288, 786432),
+                   (48, 6000, 393216), (96, 2500, 160000), (192, 768, 196608), (512, 512, 32768))
+HELDOUT2_DISTRIBUTIONS = ("bimodal", "exponential")
 SCHEDULE_METHODS = ("ragged-classified", "ragged-naive", "ragged-auto")
 
 
@@ -74,6 +81,12 @@ def cases():
         for op in ("sum", "max", "softmax"):
             for dist in DISTRIBUTIONS:
                 out.append(("heldout", f"{op}-f32-d{d}-b{b}-{dist}",
+                            ["--op", op, "--dtype", "f32", "--d", str(d), "--distribution", dist,
+                             "--segments", str(b), "--total-elements", str(n), "--methods", *SCHEDULE_METHODS]))
+    for d, b, n in HELDOUT2_SHAPES:
+        for op in ("sum", "max", "softmax"):
+            for dist in HELDOUT2_DISTRIBUTIONS:
+                out.append(("heldout2", f"{op}-f32-d{d}-b{b}-{dist}",
                             ["--op", op, "--dtype", "f32", "--d", str(d), "--distribution", dist,
                              "--segments", str(b), "--total-elements", str(n), "--methods", *SCHEDULE_METHODS]))
     return out

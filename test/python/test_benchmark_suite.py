@@ -6,13 +6,14 @@ from types import SimpleNamespace
 import pytest
 
 from bench import run as benchmark
-from bench.suite import ALL_METHODS, COMPARE_METHODS, HELDOUT_SHAPES, SHAPES, cases
+from bench.suite import (ALL_METHODS, COMPARE_METHODS, DISTRIBUTIONS, HELDOUT2_DISTRIBUTIONS, HELDOUT2_SHAPES,
+                         HELDOUT_SHAPES, SHAPES, cases)
 from bench.summarize import summarize
 
 
 def test_suite_covers_every_case_with_each_comparison():
     configurations = cases()
-    assert len({(group, name) for group, name, _ in configurations}) == len(configurations) == 77 + 19 + 63
+    assert len({(group, name) for group, name, _ in configurations}) == len(configurations) == 77 + 19 + 63 + 48
     main = [flags for group, _, flags in configurations if group == "main"]
     assert len(main) == 19
     assert all(flags[flags.index("--methods") + 1:] == list(ALL_METHODS) for flags in main)
@@ -22,7 +23,7 @@ def test_suite_covers_every_case_with_each_comparison():
                for flags in graph.values())
     groups = {group for group, _, _ in configurations}
     assert groups == {"main", "hints", "ablation/serial-classes", "ablation/no-row-pipelining", "ablation/three-pass",
-                      "ablation/no-vectorize", "compare", "heldout"}
+                      "ablation/no-vectorize", "compare", "heldout", "heldout2"}
 
 
 def test_heldout_shapes_differ_from_the_fitted_ones():
@@ -34,6 +35,23 @@ def test_heldout_shapes_differ_from_the_fitted_ones():
         shape = (int(flags[flags.index("--d") + 1]), int(flags[flags.index("--segments") + 1]),
                  int(flags[flags.index("--total-elements") + 1]))
         assert shape in HELDOUT_SHAPES and shape not in fitted
+        assert flags[flags.index("--methods") + 1:] == ["ragged-classified", "ragged-naive", "ragged-auto"]
+
+
+def test_second_heldout_set_shares_no_shape_dimension_or_distribution_with_earlier_runs():
+    earlier = {(d, int(b), int(n)) for d, (b, n) in SHAPES.items()} | set(HELDOUT_SHAPES)
+    assert len(HELDOUT2_SHAPES) == len(set(HELDOUT2_SHAPES)) == 8
+    def values(shapes, position):
+        return {shape[position] for shape in shapes}
+    assert values(earlier, 0) & values(HELDOUT2_SHAPES, 0) == {1}   # D=1 again, with new B and N
+    assert not values(earlier, 1) & values(HELDOUT2_SHAPES, 1) and not values(earlier, 2) & values(HELDOUT2_SHAPES, 2)
+    assert not set(HELDOUT2_DISTRIBUTIONS) & set(DISTRIBUTIONS)
+    heldout = [flags for group, _, flags in cases() if group == "heldout2"]
+    assert len(heldout) == 8 * 3 * 2
+    for flags in heldout:
+        shape = (int(flags[flags.index("--d") + 1]), int(flags[flags.index("--segments") + 1]),
+                 int(flags[flags.index("--total-elements") + 1]))
+        assert shape in HELDOUT2_SHAPES and flags[flags.index("--distribution") + 1] in HELDOUT2_DISTRIBUTIONS
         assert flags[flags.index("--methods") + 1:] == ["ragged-classified", "ragged-naive", "ragged-auto"]
 
 
