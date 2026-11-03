@@ -36,6 +36,12 @@ for empty segments, outputs cast back to the input dtype, offsets assumed valid
 
   Each call includes bf16 promotion, CUB workspace queries and allocation,
   every kernel and the output cast.
+- `torch_reference.csr_sum` (`cusparse`): segment sums as the product of a
+  `[B, N]` CSR matrix of ones, whose row pointers are the offsets, with the
+  values; PyTorch runs CSR × dense on CUDA with `cusparseSpMM`. The column
+  indices `0..N-1` and the unit values depend only on N and are built once
+  per input; the CSR tensor is built in every call. Sums are cuSPARSE's
+  uncompensated f32 accumulation. Max and softmax have no SpMM form.
 - `triton_reference.py`: Triton 3.8 kernels with two mappings. `segment` runs
   one program per (segment, feature tile) over all of its rows. `chunked` cuts
   every segment into chunks of at most CHUNK rows, one program each: two small

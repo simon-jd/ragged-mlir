@@ -73,12 +73,14 @@ the measurement), so a rerun writes a new directory rather than one under
 | `torch-segment` | `torch.segment_reduce` (sum and max) with f32 accumulation |
 | `njt-eager`, `njt-compile` | `torch.nested` jagged tensors, eager and `torch.compile(fullgraph=True)`; max pads explicitly with `-inf` because NJT's own padding breaks empty and all-`-inf` segments |
 | `cuda-naive` | one 256-thread CUDA block per segment, threads over rows and up to 32 feature columns, shared-memory tree (`baselines/cuda/baselines.cu`) |
-| `cub` | CUB 3.5 `DeviceSegmentedReduce` sum and max; softmax as CUB max, element-parallel exp, CUB sum and element-parallel division (D=1 only) |
+| `cub` | CUB 3.5 `DeviceSegmentedReduce` sum and max; softmax as CUB max, element-parallel exp, CUB sum and element-parallel division. At D>1 the call transposes the values to feature-major `[D, N]`, reduces one CUB segment per (feature, segment) and transposes the result back |
+| `cusparse` | segment sums as a sparse-dense product: a `[B, N]` CSR matrix of ones (row pointers = offsets) times the values, which PyTorch runs with `cusparseSpMM`; sum only, i64 offsets |
 | `triton` | Triton kernels autotuned on the input: one program per segment, or chunked segments with a combine kernel; online softmax ([baselines/README.md](../baselines/README.md)) |
-| `fbgemm` | FBGEMM 1.8 `jagged_softmax`, when installed |
+| `fbgemm` | FBGEMM 1.9 `segment_sum_csr` (sum at D=1) and `jagged_softmax`, when installed |
 
-Unsupported combinations (CUB at D>1, softmax in `torch.segment_reduce`) are
-`n/a` cells; a missing optional package is unmeasured, not substituted.
+Unsupported combinations (max or softmax with cuSPARSE, softmax in
+`torch.segment_reduce`) are `n/a` cells; a missing optional package is
+unmeasured, not substituted.
 
 ## Options
 

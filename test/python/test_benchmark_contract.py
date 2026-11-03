@@ -85,3 +85,12 @@ def test_complete_njt_max_baseline_preserves_empty_identity_and_f32_preprocessin
     assert 'padding' in evidence['baseline_strategy']
     expected_input = values.float().numpy() * np.float32(args.scale)
     assert_matches(actual.float().numpy(), expected_input, offsets.numpy(), operation='max', input_dtype=dtype)
+
+
+@pytest.mark.parametrize("op,offsets_dtype", [("max", "int64"), ("softmax", "int64"), ("sum", "int32")])
+def test_cusparse_comparison_is_sum_only_with_i64_row_pointers(tmp_path, op, offsets_dtype):
+    torch = pytest.importorskip("torch")
+    from bench.run import NotApplicable, make_call
+    offsets = torch.tensor([0, 2], dtype=getattr(torch, offsets_dtype))
+    with pytest.raises(NotApplicable):
+        make_call("cusparse", SimpleNamespace(op=op, scale=1.0), torch, torch.ones(2, 1), offsets, tmp_path)

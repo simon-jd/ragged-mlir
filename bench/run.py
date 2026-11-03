@@ -28,7 +28,8 @@ from oracle import assert_matches, quantize_bf16
 
 ROOT = Path(__file__).resolve().parents[1]
 L2_MODES = ("warm", "cold", "both")
-METHODS = ("ragged-naive", "ragged-classified", "ragged-auto", "torch-segment", "njt-eager", "njt-compile", "cuda-naive", "cub", "triton", "fbgemm")
+METHODS = ("ragged-naive", "ragged-classified", "ragged-auto", "torch-segment", "njt-eager", "njt-compile", "cuda-naive", "cub",
+           "cusparse", "triton", "fbgemm")
 
 
 class NotApplicable(Exception):
@@ -180,6 +181,17 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
         return call, metadata
     from baselines import torch_reference
     torch_provenance = {"source_sha256": hashlib.sha256(Path(torch_reference.__file__).read_bytes()).hexdigest()}
+    if method == "cusparse":
+        if args.op != "sum":
+            raise NotApplicable("cuSPARSE SpMM computes segment sums only")
+        if offsets.dtype != torch.int64:
+            raise NotApplicable("the CSR baseline uses i64 row pointers")
+        n = values.shape[0]
+        columns = torch.arange(n, dtype=offsets.dtype, device=values.device)
+        ones = torch.ones(n, dtype=torch.float32, device=values.device)
+        return (lambda: baseline_output(torch_reference.csr_sum(baseline_input(), offsets, columns, ones)),
+                {**torch_provenance, "mapping": "torch CSR @ dense (cusparseSpMM): a [B, N] CSR matrix of ones, "
+                                                "built per call around per-shape column indices and values"})
     if method == "torch-segment":
         if args.op == "softmax":
             raise NotApplicable("torch.segment_reduce has no softmax operation")

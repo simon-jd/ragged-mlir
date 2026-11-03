@@ -16,6 +16,20 @@ def segment_reduce(values: torch.Tensor, offsets: torch.Tensor, kind: str) -> to
     return torch.segment_reduce(work, kind, offsets=offsets, axis=0).to(values.dtype)
 
 
+def csr_sum(values: torch.Tensor, offsets: torch.Tensor, columns: torch.Tensor, ones: torch.Tensor) -> torch.Tensor:
+    """Segment sums as a sparse-dense product, which PyTorch runs with cusparseSpMM.
+
+    The [B, N] CSR matrix has row pointers `offsets`, column indices 0..N-1 and
+    unit values, so row b sums the rows of `values` in segment b. `columns`
+    and `ones` depend only on N and are built once per input shape. Sums are
+    cuSPARSE's ordinary f32 accumulation, not compensated.
+    """
+    work = values.float() if values.dtype == torch.bfloat16 else values
+    csr = torch.sparse_csr_tensor(offsets, columns, ones, (offsets.numel() - 1, values.shape[0]),
+                                  check_invariants=False)
+    return (csr @ work).to(values.dtype)
+
+
 def njt_softmax(values: torch.Tensor, offsets: torch.Tensor, *, min_len=None, max_len=None) -> torch.Tensor:
     work = values.float() if values.dtype == torch.bfloat16 else values
     nt = torch.nested.nested_tensor_from_jagged(work, offsets=offsets, min_seqlen=min_len, max_seqlen=max_len)

@@ -55,3 +55,25 @@ def test_native_baseline_boundaries(native_environment, method, op, offsets, val
         output = adapter.call(method, tensor, bounds, op)
     stream.synchronize()
     assert_matches(output.float().cpu().numpy(), values, offsets, operation=op, input_dtype='f32')
+
+
+@pytest.mark.parametrize('d', [1, 7, 128])
+@pytest.mark.parametrize('dtype', ['f32', 'bf16'])
+@pytest.mark.parametrize('case', ['mixed', 'special'])
+def test_cusparse_csr_sum(native_environment, d, dtype, case):
+    torch, _ = native_environment
+    from baselines.torch_reference import csr_sum
+    if case == 'mixed':
+        offsets = np.array([0, 0, 1, 33, 4130, 4130, 4161], dtype=np.int64)
+        values = np.random.default_rng(821).normal(size=(4161, d)).astype(np.float32)
+    else:
+        offsets = np.array([0, 2, 4, 6], dtype=np.int64)
+        values = np.repeat(np.array([[np.inf], [1], [np.nan], [2], [-np.inf], [np.inf]], np.float32), d, axis=1)
+    if dtype == 'bf16':
+        values = quantize_bf16(values)
+    tensor = torch.from_numpy(values).to('cuda', dtype=torch.float32 if dtype == 'f32' else torch.bfloat16)
+    n = tensor.shape[0]
+    columns = torch.arange(n, dtype=torch.int64, device='cuda')
+    output = csr_sum(tensor, torch.from_numpy(offsets).to('cuda'), columns, torch.ones(n, device='cuda'))
+    assert output.shape == (len(offsets) - 1, d) and output.dtype == tensor.dtype
+    assert_matches(output.float().cpu().numpy(), values, offsets, operation='sum', input_dtype=dtype)
