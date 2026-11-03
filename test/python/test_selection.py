@@ -21,22 +21,37 @@ def model(classified, naive, margin=0.0):
 def test_shipped_model_is_valid_and_records_its_calibration():
     shipped = CostModel.load(MODEL_PATH)
     assert set(shipped.coefficients) == {"reduce", "softmax"}
-    assert json.loads(MODEL_PATH.read_text())["calibration"]
+    assert shipped.version == 2 and shipped.l2_mib == 72.0
+    calibration = json.loads(MODEL_PATH.read_text())["calibration"]
+    assert calibration["groups"] == ["main", "heldout"] and calibration["shapes"] == 9
 
 
 def test_features_count_elements_thread_elements_segments_and_skew():
     # 2^20 rows of D=4 in 1024 segments (mean 1024 rows), longest 2^14 rows
     # (skew 16), 32 features per tile.
-    assert features(2**20, 1024, 4, 2**14, 32) == (1.0, 16.0, 4.096, 1.024, 64.0, 16.0)
-    assert features(2**20, 1024, 4, 2**14, 32, 2)[5] == 8.0
+    assert features(2**20, 1024, 4, 2**14, 32) == (1.0, 16.0, 4.096, 1.024, 64.0, 0.0)   # 16 MiB fit the L2
     assert features(64, 1, 1, 64, 1)[4] == 0   # no skew
+
+
+def test_last_term_is_the_working_set_beyond_the_l2_or_the_row_bytes_for_version_1():
+    # 128 MiB of rows; a sum writes 1024 output rows (1/64 MiB), a softmax 128 MiB.
+    assert features(2**23, 1024, 4, 64, 32, op="sum")[5] == 128 + 1 / 64 - 72
+    assert features(2**23, 1024, 4, 64, 32, op="softmax")[5] == 184.0
+    assert features(2**23, 1024, 4, 64, 32, op="softmax", l2_mib=200.0)[5] == 56.0
+    assert features(2**23, 1024, 4, 64, 32, 2, op="max")[5] == 0.0   # 64 MiB of bf16 rows fit
+    assert features(2**20, 1024, 4, 2**14, 32, version=1)[5] == 16.0
+    assert features(2**20, 1024, 4, 2**14, 32, 2, version=1)[5] == 8.0
 
 
 @pytest.mark.parametrize("bad", [{"version": 2}, {"version": 1, "margin": 0.1, "coefficients": {}},
                                  {"version": 1, "margin": 1.0, "coefficients": {
                                      name: {"classified": [0] * 6, "naive": [0] * 6} for name in ("reduce", "softmax")}},
                                  {"version": 1, "margin": 0.0, "coefficients": {
-                                     name: {"classified": [-1, 0, 0, 0, 0, 0], "naive": [0] * 6} for name in ("reduce", "softmax")}}])
+                                     name: {"classified": [-1, 0, 0, 0, 0, 0], "naive": [0] * 6} for name in ("reduce", "softmax")}},
+                                 {"version": 2, "margin": 0.0, "coefficients": {
+                                     name: {"classified": [0] * 6, "naive": [0] * 6} for name in ("reduce", "softmax")}},
+                                 {"version": 2, "margin": 0.0, "l2_mib": 0, "coefficients": {
+                                     name: {"classified": [0] * 6, "naive": [0] * 6} for name in ("reduce", "softmax")}}])
 def test_invalid_models_are_rejected(bad):
     with pytest.raises(CacheMismatch):
         CostModel.from_dict(bad)

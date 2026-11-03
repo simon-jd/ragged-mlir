@@ -6,18 +6,24 @@ the row count N, the segment count B, the longest segment L and the feature
 width D (and the element size), and runs the faster one. The prediction for
 a schedule is linear in six terms (microseconds),
 
-    t = c0 + c1 * M + c2 * S + c3 * B + c4 * M * log2(skew) + c5 * MiB
+    t = c0 + c1 * M + c2 * S + c3 * B + c4 * M * log2(skew) + c5 * X
 
 with M = N*D elements (in units of 2^18, a MiB of f32), S = L * span / 128
 the elements each thread of the one block that owns the longest segment
-reads (span = d_tile * d_vector features per tile), skew = L / (N/B) and MiB
-the bytes of the rows: a fixed cost (launches and host work), the per-element
+reads (span = d_tile * d_vector features per tile), skew = L / (N/B) and X
+the MiB of the call's working set (the input rows plus the output: B rows
+for sum and max, N rows for softmax) beyond the L2 capacity the model was
+calibrated with: a fixed cost (host work and launches), the per-element
 folds, the critical path of block per segment, per-segment work, the
-imbalance that skewed lengths add, and moving the bytes (which for f32 is a
-second copy of M, so the fit decides how bf16 differs). Coefficients are fitted per operation
-family (sum and max; softmax) and schedule by ``bench.calibrate`` on
-training seeds and stored in ``cost_model.json``; classification runs only
-when its prediction is lower than block per segment's by the stored margin.
+imbalance that skewed lengths add, and the bytes that back-to-back calls
+cannot keep in the L2. Coefficients are fitted per operation family (sum
+and max; softmax) and schedule by ``bench.calibrate`` and stored in
+``cost_model.json``; classification runs only when its prediction is lower
+than block per segment's by the stored margin.
+
+Version 1 models (before 2026-11) used the row bytes, N*D*element size in
+MiB, as the sixth term; for f32 that is M again. They still load, so that
+``bench.calibrate evaluate`` can replay their choices.
 
 L comes from the caller (``run(max_len=...)``, the metadata a jagged tensor
 such as NJT carries). Without it no statistic of the lengths is known on the
@@ -38,19 +44,29 @@ MODEL_PATH = Path(__file__).with_name("cost_model.json")
 SCHEDULES = ("classified", "naive")
 FAMILIES = ("reduce", "softmax")
 TERMS = 6
+# The sixth term of each model version.
+LAST_TERM = {1: "row_mib", 2: "l2_excess_mib"}
 
 
 def family(op: str) -> str:
     return "softmax" if op == "softmax" else "reduce"
 
 
-def features(n: int, b: int, d: int, max_len: int, span: int, element_bytes: int = 4) -> tuple[float, ...]:
+def features(n: int, b: int, d: int, max_len: int, span: int, element_bytes: int = 4, op: str = "sum",
+             l2_mib: float = 72.0, version: int = 2) -> tuple[float, ...]:
     """The six terms of the prediction: 2^18 elements, thousands of thread
-    elements and of segments, skew-weighted elements and MiB."""
+    elements and of segments, skew-weighted elements, and MiB (of the
+    working set beyond an L2 of ``l2_mib``; of the rows for version 1)."""
     elements = n * d / 2**18
     skew = max_len * b / n if n else 1.0
+    rows = n * d * element_bytes / 2**20
+    if version == 1:
+        last = rows
+    else:
+        output_rows = n if op == "softmax" else b
+        last = max(0.0, rows + output_rows * d * element_bytes / 2**20 - l2_mib)
     return (1.0, elements, max_len * span / 128 / 1000.0, b / 1000.0,
-            elements * math.log2(max(1.0, skew)), n * d * element_bytes / 2**20)
+            elements * math.log2(max(1.0, skew)), last)
 
 
 @dataclass(frozen=True)
@@ -58,24 +74,29 @@ class CostModel:
     coefficients: dict[str, dict[str, tuple[float, ...]]]
     margin: float
     calibration: dict[str, Any]
+    version: int = 2
+    l2_mib: float = 72.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CostModel":
         try:
-            if data["version"] != 1:
+            version = data["version"]
+            if version not in LAST_TERM:
                 raise CacheMismatch("unsupported cost model version")
             coefficients = {
                 name: {schedule: tuple(float(value) for value in data["coefficients"][name][schedule])
                        for schedule in SCHEDULES}
                 for name in FAMILIES}
             margin = float(data["margin"])
+            l2_mib = float(data["l2_mib"]) if version >= 2 else 0.0
         except (KeyError, TypeError, ValueError) as exc:
             raise CacheMismatch(f"invalid cost model: {exc}") from exc
         if (any(len(values) != TERMS or any(value < 0 for value in values)
                 for schedules in coefficients.values() for values in schedules.values())
-                or not 0 <= margin < 1):
-            raise CacheMismatch(f"cost model coefficients must be {TERMS} nonnegative terms and margin in [0, 1)")
-        return cls(coefficients, margin, dict(data.get("calibration", {})))
+                or not 0 <= margin < 1 or (version >= 2 and not l2_mib > 0)):
+            raise CacheMismatch(f"cost model coefficients must be {TERMS} nonnegative terms, margin in [0, 1) "
+                                "and the L2 capacity positive")
+        return cls(coefficients, margin, dict(data.get("calibration", {})), version, l2_mib)
 
     @classmethod
     def load(cls, path: Path = MODEL_PATH) -> "CostModel":
@@ -83,7 +104,7 @@ class CostModel:
 
     def predict(self, schedule: str, op: str, n: int, b: int, d: int, max_len: int, span: int,
                 element_bytes: int = 4) -> float:
-        terms = features(n, b, d, max_len, span, element_bytes)
+        terms = features(n, b, d, max_len, span, element_bytes, op, self.l2_mib, self.version)
         return sum(c * x for c, x in zip(self.coefficients[family(op)][schedule], terms))
 
     def choose(self, op: str, n: int, b: int, d: int, max_len: int | None,

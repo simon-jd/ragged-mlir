@@ -1,24 +1,28 @@
-"""Fit ragged.selection's cost model on training seeds; evaluate it on held-out ones.
+"""Fit ragged.selection's cost model on measured runs; evaluate it on held-out ones.
 
 RUNS holds bench.run results that measured both schedules, ragged-classified
-and ragged-naive, for example
+and ragged-naive, in one or more suite groups, for example
 
-    python -m bench.suite --groups main --seeds 711 712 --output build/calibration \\
-        --methods ragged-classified ragged-naive --lock /var/tmp/gpu.lock
-    python -m bench.calibrate fit build/calibration --train 711 712 --output python/ragged/cost_model.json
+    python -m bench.calibrate fit results/bench/runs --groups main heldout --train 711 712 713 \\
+        --output python/ragged/cost_model.json
 
-Each (workload, seed) contributes the median over repetitions of each
+Each (group, workload, seed) contributes the median over repetitions of each
 process's median complete-call time with a warm L2. For each operation family
-and schedule, nonnegative coefficients of the four terms of
+and schedule, nonnegative coefficients of the six terms of
 ragged.selection.features are fitted to minimize the squared relative error
 (every subset of terms is solved by least squares and the best nonnegative
-solution kept). The margin is the smallest of 0, 1, ..., 20% for which, on the
-training data, every input where classification is chosen measures no more
-than NOISE (2%) slower than block per segment.
+solution kept). The margin by which classification must be predicted faster
+is chosen by leave-one-shape-out cross-validation: each (N, B, D) shape in
+turn is left out, the coefficients are fitted on the others, and the margin
+of 0, 1, ..., 10% that puts the most left-out inputs within 3% of the faster
+schedule is kept (the smallest on a tie).
 
 `evaluate` reads a suite's runs (which also time ragged-auto, the adaptive
-program) and reports, per held-out workload and seed, both schedules, the one
-the model chose and how the adaptive call compares with ragged-naive.
+program) and reports, per workload and seed, both schedules, the one the
+model chooses, the adaptive call as measured (it ran the model installed
+when the runs were made) and both against the faster schedule measured in
+the same runs. `--model` replays another model's choices (version 1 models
+included) on the same runs.
 """
 from __future__ import annotations
 
@@ -37,8 +41,9 @@ from ragged.optimizations import Optimizations  # noqa: E402
 from ragged.selection import FAMILIES, SCHEDULES, TERMS, CostModel, family, features  # noqa: E402
 
 METHOD = {"classified": "ragged-classified", "naive": "ragged-naive"}
-NOISE = 0.02   # run-to-run spread treated as a tie when fitting the margin
 NOISE_TIE = 0.03   # what the results call a tie
+MARGINS = [percent / 100 for percent in range(11)]
+L2_MIB = 72.0      # RTX 4090: 72 MiB of L2, the GPU every committed run measured
 
 
 def collect(runs: Path, l2: str = "warm", group: str = "main") -> dict:
@@ -82,111 +87,136 @@ def nnls(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return best
 
 
-def fit(found: dict, seeds: list[int]) -> tuple[dict, list[dict]]:
+def measured(entry: dict) -> dict[str, float]:
+    return {s: statistics.median(entry["methods"][METHOD[s]]) for s in SCHEDULES}
+
+
+def points(found: dict, seeds: list[int]) -> list[tuple[tuple, dict]]:
+    """Training inputs: entries of the given seeds that measured both schedules."""
+    return [(key, entry) for key, entry in sorted(found.items())
+            if key[-1] in seeds and all(entry["methods"].get(METHOD[s]) for s in SCHEDULES)]
+
+
+def fit(inputs: list[tuple[tuple, dict]]) -> dict:
     coefficients: dict = {name: {} for name in FAMILIES}
-    rows = []
     for name in FAMILIES:
-        points = [(key, entry) for key, entry in sorted(found.items())
-                  if key[1] in seeds and family(entry["case"]["op"]) == name
-                  and all(entry["methods"].get(METHOD[s]) for s in SCHEDULES)]
-        if len(points) < TERMS:
-            raise SystemExit(f"{name}: {len(points)} training inputs, need at least {TERMS}")
+        chosen = [entry for _, entry in inputs if family(entry["case"]["op"]) == name]
+        if len(chosen) < TERMS:
+            raise SystemExit(f"{name}: {len(chosen)} training inputs, need at least {TERMS}")
+        x = np.array([features(*shape(entry["case"]), op=entry["case"]["op"], l2_mib=L2_MIB) for entry in chosen])
         for schedule in SCHEDULES:
-            x = np.array([features(*shape(entry["case"])) for _, entry in points])
-            t = np.array([statistics.median(entry["methods"][METHOD[schedule]]) for _, entry in points])
+            t = np.array([measured(entry)[schedule] for entry in chosen])
             coefficients[name][schedule] = [round(float(c), 6) for c in nnls(x / t[:, None], np.ones(len(t)))]
-        for key, entry in points:
-            rows.append({"case": key[0], "seed": key[1], "family": name,
-                         **{s: statistics.median(entry["methods"][METHOD[s]]) for s in SCHEDULES}})
-    return coefficients, rows
+    return coefficients
 
 
-def margin_for(model_data: dict, found: dict, seeds: list[int]) -> float:
-    for percent in range(0, 21):
-        model = CostModel.from_dict({**model_data, "margin": percent / 100})
-        safe = True
-        for (name, seed), entry in found.items():
-            if seed not in seeds or not all(entry["methods"].get(METHOD[s]) for s in SCHEDULES):
-                continue
-            case = entry["case"]
-            chosen, _ = model.choose(case["op"], *shape(case))
-            measured = {s: statistics.median(entry["methods"][METHOD[s]]) for s in SCHEDULES}
-            safe &= chosen == "naive" or measured["classified"] <= measured["naive"] * (1 + NOISE)
-        if safe:
-            return percent / 100
-    return 0.2
+def model_data(coefficients: dict, margin: float, calibration: dict) -> dict:
+    return {"version": 2, "coefficients": coefficients, "margin": margin, "l2_mib": L2_MIB,
+            "calibration": calibration}
+
+
+def within(model: CostModel, inputs: list[tuple[tuple, dict]]) -> int:
+    """How many inputs the model's choice puts within 3% of the faster schedule."""
+    count = 0
+    for _, entry in inputs:
+        chosen, _ = model.choose(entry["case"]["op"], *shape(entry["case"]))
+        times = measured(entry)
+        count += times[chosen] <= min(times.values()) * (1 + NOISE_TIE)
+    return count
+
+
+def margin_by_shape(inputs: list[tuple[tuple, dict]]) -> tuple[float, dict[float, int]]:
+    """The margin that leave-one-shape-out cross-validation puts the most inputs within 3% with."""
+    shapes = sorted({shape(entry["case"])[:3] for _, entry in inputs})
+    scores = dict.fromkeys(MARGINS, 0)
+    for left_out in shapes:
+        train = [item for item in inputs if shape(item[1]["case"])[:3] != left_out]
+        test = [item for item in inputs if shape(item[1]["case"])[:3] == left_out]
+        coefficients = fit(train)
+        for margin in MARGINS:
+            scores[margin] += within(CostModel.from_dict(model_data(coefficients, margin, {})), test)
+    best = max(scores.values())
+    return min(margin for margin, score in scores.items() if score == best), scores
 
 
 def run_fit(args: argparse.Namespace) -> None:
-    found = collect(args.runs)
-    coefficients, rows = fit(found, args.train)
-    data = {"version": 1, "coefficients": coefficients, "margin": 0.0,
-            "calibration": {"runs": str(args.runs), "train_seeds": args.train, "l2": "warm",
-                            "statistic": "median over processes of each process's median complete-call time",
-                            "terms": "t_us = c0 + c1*M + c2*S + c3*B/1000 + c4*M*log2(skew) + c5*MiB, "
-                                     "M = N*D/2^18, S = L*d_tile*d_vector/128/1000, skew = L*B/N, "
-                                     "MiB = N*D*bytes/2^20",
-                            "inputs": len(rows)}}
-    data["margin"] = margin_for(data, found, args.train)
+    found = {(group, *key): entry for group in args.groups
+             for key, entry in collect(args.runs, "warm", group).items()}
+    inputs = points(found, args.train)
+    coefficients = fit(inputs)
+    margin, scores = margin_by_shape(inputs)
+    shapes = sorted({shape(entry["case"])[:3] for _, entry in inputs})
+    data = model_data(coefficients, margin, {
+        "runs": str(args.runs), "groups": args.groups, "train_seeds": args.train, "l2": "warm",
+        "statistic": "median over processes of each process's median complete-call time",
+        "terms": "t_us = c0 + c1*M + c2*S + c3*B/1000 + c4*M*log2(skew) + c5*X, M = N*D/2^18, "
+                 "S = L*d_tile*d_vector/128/1000, skew = L*B/N, X = MiB of input rows plus output "
+                 "(B rows, N for softmax) beyond l2_mib",
+        "margin": "leave-one-shape-out cross-validation over 0..10%",
+        "inputs": len(inputs), "shapes": len(shapes)})
     args.output.write_text(json.dumps(data, indent=2) + "\n")
     model = CostModel.from_dict(data)
-    print(f"margin {data['margin']:.2f}; coefficients {json.dumps(coefficients)}")
-    print(f"{'case':30} {'seed':>4} {'classified':>10} {'pred':>7} {'naive':>8} {'pred':>7}  chosen")
-    for row in rows:
-        entry = found[(row["case"], row["seed"])]
+    print(f"{len(inputs)} inputs in {len(shapes)} (N, B, D) shapes; coefficients {json.dumps(coefficients)}")
+    print("left-out inputs within 3% per margin: " +
+          ", ".join(f"{round(100 * m)}% {score}" for m, score in scores.items()) + f"; margin {margin:.2f}")
+    print(f"within 3% of the faster schedule on the training inputs: {within(model, inputs)} of {len(inputs)}")
+    print(f"{'group':8} {'case':32} {'seed':>4} {'classified':>10} {'pred':>7} {'naive':>8} {'pred':>7}  chosen")
+    for (group, name, seed), entry in inputs:
         chosen, info = model.choose(entry["case"]["op"], *shape(entry["case"]))
-        predicted = info["predicted_us"]
-        print(f"{row['case']:30} {row['seed']:>4} {row['classified']:10.1f} {predicted['classified']:7.1f} "
-              f"{row['naive']:8.1f} {predicted['naive']:7.1f}  {chosen}")
+        predicted, times = info["predicted_us"], measured(entry)
+        print(f"{group:8} {name:32} {seed:>4} {times['classified']:10.1f} {predicted['classified']:7.1f} "
+              f"{times['naive']:8.1f} {predicted['naive']:7.1f}  {chosen}")
 
 
 def run_evaluate(args: argparse.Namespace) -> None:
     model = CostModel.load(args.model)
     for l2 in ("warm", "cold"):
         found = collect(args.runs, l2, args.group)
-        print(f"{l2} L2, {args.group} runs, seeds {' '.join(map(str, args.seeds))}: "
-              "median complete-call us over repetitions")
-        print(f"{'case':30} {'seed':>4} {'classified':>10} {'naive':>8} {'chosen':>10} {'adaptive':>9} "
-              f"{'vs naive':>8} {'naive IQR':>10} {'vs best':>8}")
-        worst, outcomes = [], defaultdict(int)
+        print(f"{l2} L2, {args.group} runs, seeds {' '.join(map(str, args.seeds))}, model {args.model} "
+              f"(version {model.version}): median complete-call us over repetitions")
+        print(f"{'case':34} {'seed':>4} {'classified':>10} {'naive':>8} {'chooses':>10} {'vs best':>8} "
+              f"{'adaptive ran':>12} {'adaptive':>9} {'vs best':>8}")
+        outcomes, adaptive = defaultdict(int), defaultdict(int)
         for (name, seed), entry in sorted(found.items()):
-            if seed not in args.seeds or not entry["methods"].get("ragged-auto"):
+            if seed not in args.seeds or not all(entry["methods"].get(METHOD[s]) for s in SCHEDULES):
                 continue
             case = entry["case"]
             chosen, _ = model.choose(case["op"], *shape(case))
-            times = {method: statistics.median(values) for method, values in entry["methods"].items()}
-            naive_runs = sorted(entry["methods"]["ragged-naive"])
-            q1, q3 = np.percentile(naive_runs, [25, 75])
-            ratio = times["ragged-auto"] / times["ragged-naive"]
-            worst.append((ratio, name, seed))
-            selected = set(entry["selected"]) or {chosen}
-            # Against the faster of the two schedules measured in the same runs.
-            best = min(times["ragged-naive"], times.get("ragged-classified", float("inf")))
-            regret = times["ragged-auto"] / best - 1
-            outcomes["within 3% of the faster schedule" if regret <= NOISE_TIE else "more than 3% slower"] += 1
-            print(f"{name:30} {seed:>4} {times.get('ragged-classified', float('nan')):10.1f} "
-                  f"{times['ragged-naive']:8.1f} {'/'.join(sorted(selected)):>10} {times['ragged-auto']:9.1f} "
-                  f"{100 * (ratio - 1):+7.1f}% {q1:5.1f}-{q3:<5.1f} {100 * regret:+7.1f}%")
-        if worst:
-            ratio, name, seed = max(worst)
-            print(f"largest excess over ragged-naive: {100 * (ratio - 1):+.1f}% ({name}, seed {seed})")
-            print("adaptive against the faster schedule: " +
-                  ", ".join(f"{count} {label}" for label, count in sorted(outcomes.items())) + "\n")
+            times = measured(entry)
+            best = min(times.values())
+            regret = times[chosen] / best - 1
+            outcomes["within 3%" if regret <= NOISE_TIE else "more than 3% slower"] += 1
+            line = (f"{name:34} {seed:>4} {times['classified']:10.1f} {times['naive']:8.1f} {chosen:>10} "
+                    f"{100 * regret:+7.1f}%")
+            if entry["methods"].get("ragged-auto"):
+                auto = statistics.median(entry["methods"]["ragged-auto"])
+                ran = "/".join(sorted(set(entry["selected"])))
+                adaptive["within 3%" if auto / best - 1 <= NOISE_TIE else "more than 3% slower"] += 1
+                line += f" {ran:>12} {auto:9.1f} {100 * (auto / best - 1):+7.1f}%"
+            print(line)
+        total = sum(outcomes.values())
+        print("the model's choice against the faster schedule: " +
+              ", ".join(f"{count} of {total} {label}" for label, count in sorted(outcomes.items())))
+        if adaptive:
+            print("the adaptive call as measured (with the model of those runs) against the faster schedule: " +
+                  ", ".join(f"{count} of {sum(adaptive.values())} {label}" for label, count in sorted(adaptive.items())))
+        print()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    fitter = commands.add_parser("fit", help="fit coefficients and margin on training seeds")
+    fitter = commands.add_parser("fit", help="fit coefficients and margin on training runs")
     fitter.add_argument("runs", type=Path)
-    fitter.add_argument("--train", type=int, nargs="+", default=[711, 712])
+    fitter.add_argument("--groups", nargs="+", default=["main"], help="suite groups to train on")
+    fitter.add_argument("--train", type=int, nargs="+", default=[711, 712, 713])
     fitter.add_argument("--output", type=Path, required=True)
     fitter.set_defaults(handler=run_fit)
-    evaluator = commands.add_parser("evaluate", help="compare the adaptive program with both schedules")
+    evaluator = commands.add_parser("evaluate", help="compare the model's choice and the adaptive program with both schedules")
     evaluator.add_argument("runs", type=Path)
-    evaluator.add_argument("--seeds", type=int, nargs="+", default=[713])
+    evaluator.add_argument("--seeds", type=int, nargs="+", default=[711, 712, 713])
     evaluator.add_argument("--model", type=Path, default=Path("python/ragged/cost_model.json"))
-    evaluator.add_argument("--group", default="main", help="suite group to evaluate (main, or heldout for unseen shapes)")
+    evaluator.add_argument("--group", default="heldout2", help="suite group to evaluate")
     evaluator.set_defaults(handler=run_evaluate)
     args = parser.parse_args()
     args.handler(args)
