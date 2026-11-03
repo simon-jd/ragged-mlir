@@ -26,6 +26,24 @@ MODES = {"warm": lambda cell: cell.get(TIMING), "cold": lambda cell: (cell.get("
          "graph": lambda cell: (cell.get("cuda_graph") or {}).get("replay_cuda_event_ms")}
 
 
+TIE = 0.03   # within 3% of the fastest comparison is a tie
+
+
+def versus_fastest(methods: dict, mode: str) -> dict | None:
+    """ragged-auto against the fastest non-ragged method in one L2 state:
+    a win below 0.97 times its time, a tie up to 1.03 times, else a loss."""
+    ragged = (methods.get("ragged-auto") or {}).get(mode)
+    others = [(record[mode]["median_us"], method) for method, record in methods.items()
+              if not method.startswith("ragged") and mode in record]
+    if not ragged or not others:
+        return None
+    fastest_us, fastest = min(others)
+    ratio = ragged["median_us"] / fastest_us
+    result = "win" if ratio < 1 - TIE else "tie" if ratio <= 1 + TIE else "loss"
+    return {"fastest": fastest, "fastest_us": fastest_us, "ragged_us": ragged["median_us"],
+            "ratio": round(ratio, 3), "result": result}
+
+
 def _spread(values):
     values = np.asarray(values, dtype=np.float64)
     p25, median, p75 = np.percentile(values, [25, 50, 75])
@@ -104,10 +122,14 @@ def summarize(root: Path) -> dict:
                 record["tuned_configs"] = sorted({json.dumps((cell.get("tuning") or {}).get("config"), sort_keys=True)
                                                   for cell in measured})
             entry["methods"][method] = record
+        verdicts = {mode: versus_fastest(entry["methods"], mode) for mode in MODES}
+        if any(verdicts.values()):
+            entry["versus_fastest"] = {mode: verdict for mode, verdict in verdicts.items() if verdict}
         summary.append(entry)
     return {"schema": 2, "generated_by": "python -m bench.summarize", "runs": len(runs),
             "source_commits": sorted(commit for commit in commits if commit),
             "statistic": "median and interquartile range over runs of each run's median complete-call CUDA-event time",
+            "versus_fastest": "ragged-auto / fastest non-ragged method per state: win < 0.97, tie <= 1.03, loss above",
             "gpu_state": {field: _gpu_range(states, field) for field in
                           ("clocks.sm", "clocks.mem", "temperature.gpu", "power.draw", "utilization.gpu")},
             "host_loadavg_1min": (lambda values: [min(values), max(values)] if values else None)(

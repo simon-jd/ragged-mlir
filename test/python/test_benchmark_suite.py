@@ -133,3 +133,11 @@ def test_summary_reports_cuda_graph_replays_beside_the_complete_call(tmp_path):
     assert methods["ragged-auto"]["graph"]["median_us"] == 16.0
     assert methods["ragged-auto"]["warm"]["median_us"] == 33.0
     assert "graph" not in methods["triton"] and methods["triton"]["reasons"] == ["cuda graph: RuntimeError: capture"]
+
+
+@pytest.mark.parametrize("ragged_ms,result", [(0.0290, "win"), (0.0300, "tie"), (0.0309, "tie"), (0.0310, "loss")])
+def test_each_workload_is_a_win_tie_or_loss_against_the_fastest_comparison(tmp_path, ragged_ms, result):
+    _write(tmp_path, "main", "sum-f32-d1-uniform", 711, 0,
+           [_cell("ragged-auto", ragged_ms), _cell("ragged-naive", 0.001), _cell("cub", 0.030), _cell("triton", 0.040)])
+    verdict = summarize(tmp_path)["cases"][0]["versus_fastest"]["warm"]
+    assert verdict["fastest"] == "cub" and verdict["fastest_us"] == 30.0 and verdict["result"] == result
