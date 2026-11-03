@@ -1,12 +1,25 @@
 # Benchmarking
 
 `bench/run.py` measures one workload with every requested method in one
-process. `bench/suite.py` runs the suite behind `results/bench/`: 19 workloads
-with every method, 6 with length hints and 52 ablations, each for 3 seeds of
-the length distribution and 5 repetitions, one process per run.
+process. `bench/suite.py` runs the suite behind `results/bench/`, one process
+per run, in groups:
+
+- `main`: 19 workloads with every method; `hints`: 6 with length hints;
+  `ablation/*`: 52 ablations. 3 seeds of the length distribution and 5
+  repetitions each.
+- `compare`: the same 19 workloads against every comparison, including CUB
+  at D=128, cuSPARSE and FBGEMM, with a CUDA-graph replay of each method
+  beside its complete call (`--cuda-graph`); 3 seeds and 5 repetitions.
+- `heldout`: 63 workloads on 7 shapes the cost model was not fitted on
+  (`HELDOUT_SHAPES`: D = 32, 64 and 256, and D = 1 and 128 with 4 times
+  fewer and more segments), timing ragged's two schedules and the adaptive
+  program; 3 seeds and 3 repetitions.
+
 `bench/summarize.py` turns the raw `results.json` files into `summary.json`,
-and `bench/calibrate.py` fits the cost model that chooses ragged's schedule
-per call and evaluates it on held-out seeds.
+including each workload's result against the fastest comparison (a win
+below 0.97 times its time, a tie within 3%, a loss above), and
+`bench/calibrate.py` fits the cost model that chooses ragged's schedule per
+call and evaluates it on held-out seeds and shapes.
 
 ```sh
 python -m bench.suite --groups main --seeds 711 712 --methods ragged-classified ragged-naive \

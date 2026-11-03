@@ -4,7 +4,7 @@ Speedup is the fastest comparison method's median time divided by ragged's
 (ragged-auto), for warm and cold L2; below 1 means a comparison method is
 faster. Needs matplotlib.
 
-    python -m bench.chart results/bench/summary.json --output docs/speedup.svg
+    python -m bench.chart results/bench/summary.json --group compare --output docs/speedup.svg
 """
 from __future__ import annotations
 
@@ -13,15 +13,15 @@ import json
 from pathlib import Path
 
 LABELS = {"torch-segment": "torch", "triton": "Triton", "cub": "CUB", "cuda-naive": "CUDA",
-          "njt-eager": "NJT", "njt-compile": "NJT compiled"}
+          "njt-eager": "NJT", "njt-compile": "NJT compiled", "cusparse": "cuSPARSE", "fbgemm": "FBGEMM"}
 DISTRIBUTIONS = {"uniform": "uniform", "long_tail": "long tail", "burst": "bursty"}
 
 
-def speedups(summary):
-    """(label, {mode: (speedup, fastest method)}) for every main case, in table order."""
+def speedups(summary, group="main"):
+    """(label, {mode: (speedup, fastest method)}) for every case of a group, in table order."""
     rows = []
     order = {op: index for index, op in enumerate(("sum", "max", "softmax"))}
-    cases = sorted((case for case in summary["cases"] if case["group"] == "main"),
+    cases = sorted((case for case in summary["cases"] if case["group"] == group),
                    key=lambda case: (order[case["op"]], case["dtype"] != "f32", case["D"],
                                      list(DISTRIBUTIONS).index(case["distribution"])))
     for case in cases:
@@ -38,12 +38,12 @@ def speedups(summary):
     return rows
 
 
-def draw(summary, output):
+def draw(summary, output, group="main"):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.ticker
-    rows = speedups(summary)
+    rows = speedups(summary, group)
     figure, axis = plt.subplots(figsize=(8, 0.42 * len(rows) + 1.2))
     height = 0.38
     colors = {"warm": "#3b6ea5", "cold": "#e08a2c"}
@@ -74,8 +74,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("summary", type=Path)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--group", default="main", help="suite group to draw")
     args = parser.parse_args()
-    draw(json.loads(args.summary.read_text()), args.output)
+    draw(json.loads(args.summary.read_text()), args.output, args.group)
 
 
 if __name__ == "__main__":

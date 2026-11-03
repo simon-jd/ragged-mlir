@@ -37,7 +37,8 @@ from ragged.optimizations import Optimizations  # noqa: E402
 from ragged.selection import FAMILIES, SCHEDULES, TERMS, CostModel, family, features  # noqa: E402
 
 METHOD = {"classified": "ragged-classified", "naive": "ragged-naive"}
-NOISE = 0.02   # run-to-run spread treated as a tie
+NOISE = 0.02   # run-to-run spread treated as a tie when fitting the margin
+NOISE_TIE = 0.03   # what the results call a tie
 
 
 def collect(runs: Path, l2: str = "warm", group: str = "main") -> dict:
@@ -142,11 +143,12 @@ def run_fit(args: argparse.Namespace) -> None:
 def run_evaluate(args: argparse.Namespace) -> None:
     model = CostModel.load(args.model)
     for l2 in ("warm", "cold"):
-        found = collect(args.runs, l2)
-        print(f"{l2} L2, seeds {' '.join(map(str, args.seeds))}: median complete-call us over repetitions")
+        found = collect(args.runs, l2, args.group)
+        print(f"{l2} L2, {args.group} runs, seeds {' '.join(map(str, args.seeds))}: "
+              "median complete-call us over repetitions")
         print(f"{'case':30} {'seed':>4} {'classified':>10} {'naive':>8} {'chosen':>10} {'adaptive':>9} "
-              f"{'vs naive':>8} {'naive IQR':>10}")
-        worst = []
+              f"{'vs naive':>8} {'naive IQR':>10} {'vs best':>8}")
+        worst, outcomes = [], defaultdict(int)
         for (name, seed), entry in sorted(found.items()):
             if seed not in args.seeds or not entry["methods"].get("ragged-auto"):
                 continue
@@ -158,12 +160,18 @@ def run_evaluate(args: argparse.Namespace) -> None:
             ratio = times["ragged-auto"] / times["ragged-naive"]
             worst.append((ratio, name, seed))
             selected = set(entry["selected"]) or {chosen}
+            # Against the faster of the two schedules measured in the same runs.
+            best = min(times["ragged-naive"], times.get("ragged-classified", float("inf")))
+            regret = times["ragged-auto"] / best - 1
+            outcomes["within 3% of the faster schedule" if regret <= NOISE_TIE else "more than 3% slower"] += 1
             print(f"{name:30} {seed:>4} {times.get('ragged-classified', float('nan')):10.1f} "
                   f"{times['ragged-naive']:8.1f} {'/'.join(sorted(selected)):>10} {times['ragged-auto']:9.1f} "
-                  f"{100 * (ratio - 1):+7.1f}% {q1:5.1f}-{q3:<5.1f}")
+                  f"{100 * (ratio - 1):+7.1f}% {q1:5.1f}-{q3:<5.1f} {100 * regret:+7.1f}%")
         if worst:
             ratio, name, seed = max(worst)
-            print(f"largest excess over ragged-naive: {100 * (ratio - 1):+.1f}% ({name}, seed {seed})\n")
+            print(f"largest excess over ragged-naive: {100 * (ratio - 1):+.1f}% ({name}, seed {seed})")
+            print("adaptive against the faster schedule: " +
+                  ", ".join(f"{count} {label}" for label, count in sorted(outcomes.items())) + "\n")
 
 
 def main() -> None:
@@ -178,6 +186,7 @@ def main() -> None:
     evaluator.add_argument("runs", type=Path)
     evaluator.add_argument("--seeds", type=int, nargs="+", default=[713])
     evaluator.add_argument("--model", type=Path, default=Path("python/ragged/cost_model.json"))
+    evaluator.add_argument("--group", default="main", help="suite group to evaluate (main, or heldout for unseen shapes)")
     evaluator.set_defaults(handler=run_evaluate)
     args = parser.parse_args()
     args.handler(args)

@@ -30,6 +30,18 @@ DISTRIBUTIONS = ("uniform", "long_tail", "burst")
 HINTED = {("sum", "uniform"), ("sum", "long_tail"), ("softmax", "uniform")}
 ALL_METHODS = ("ragged-naive", "ragged-classified", "ragged-auto", "torch-segment", "njt-eager", "njt-compile",
                "cuda-naive", "cub", "triton")
+# The "compare" group measures the main workloads against every comparison,
+# including those added after the main runs (CUB at D=128, cuSPARSE, FBGEMM),
+# and times a CUDA-graph replay of each method beside its complete call.
+# Eager NJT, never the fastest and up to 12 ms per call, is left out.
+COMPARE_METHODS = ("ragged-auto", "ragged-naive", "torch-segment", "njt-compile", "cuda-naive", "cub", "cusparse",
+                 "triton", "fbgemm")
+# Shapes the cost model was not fitted on, fixed before they were measured:
+# (D, B, N). The fitted shapes are D=1 with B=16,384 and D=128 with B=4,096,
+# 64 rows per segment on average; these change D, or B at the same N.
+HELDOUT_SHAPES = ((1, 4096, 1048576), (1, 65536, 1048576), (32, 8192, 524288), (64, 4096, 262144),
+                  (128, 1024, 262144), (128, 16384, 262144), (256, 2048, 131072))
+SCHEDULE_METHODS = ("ragged-classified", "ragged-naive", "ragged-auto")
 
 
 def cases():
@@ -57,6 +69,13 @@ def cases():
         if dtype == "f32" and (op, dist) in HINTED:
             methods = ["ragged-auto", "ragged-naive"] + (["torch-segment"] if op == "sum" else [])
             out.append(("hints", name, base + ["--length-hints", "--methods", *methods]))
+        out.append(("compare", name, base + ["--cuda-graph", "--methods", *COMPARE_METHODS]))
+    for d, b, n in HELDOUT_SHAPES:
+        for op in ("sum", "max", "softmax"):
+            for dist in DISTRIBUTIONS:
+                out.append(("heldout", f"{op}-f32-d{d}-b{b}-{dist}",
+                            ["--op", op, "--dtype", "f32", "--d", str(d), "--distribution", dist,
+                             "--segments", str(b), "--total-elements", str(n), "--methods", *SCHEDULE_METHODS]))
     return out
 
 

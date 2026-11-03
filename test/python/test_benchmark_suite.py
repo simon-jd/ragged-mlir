@@ -6,19 +6,35 @@ from types import SimpleNamespace
 import pytest
 
 from bench import run as benchmark
-from bench.suite import ALL_METHODS, cases
+from bench.suite import ALL_METHODS, COMPARE_METHODS, HELDOUT_SHAPES, SHAPES, cases
 from bench.summarize import summarize
 
 
 def test_suite_covers_every_case_with_each_comparison():
     configurations = cases()
-    assert len({(group, name) for group, name, _ in configurations}) == len(configurations) == 77
+    assert len({(group, name) for group, name, _ in configurations}) == len(configurations) == 77 + 19 + 63
     main = [flags for group, _, flags in configurations if group == "main"]
     assert len(main) == 19
     assert all(flags[flags.index("--methods") + 1:] == list(ALL_METHODS) for flags in main)
+    graph = {name: flags for group, name, flags in configurations if group == "compare"}
+    assert set(graph) == {name for group, name, _ in configurations if group == "main"}
+    assert all("--cuda-graph" in flags and flags[flags.index("--methods") + 1:] == list(COMPARE_METHODS)
+               for flags in graph.values())
     groups = {group for group, _, _ in configurations}
     assert groups == {"main", "hints", "ablation/serial-classes", "ablation/no-row-pipelining", "ablation/three-pass",
-                      "ablation/no-vectorize"}
+                      "ablation/no-vectorize", "compare", "heldout"}
+
+
+def test_heldout_shapes_differ_from_the_fitted_ones():
+    fitted = {(d, int(b), int(n)) for d, (b, n) in SHAPES.items()}
+    assert len(HELDOUT_SHAPES) == len(set(HELDOUT_SHAPES)) == 7 and not fitted & set(HELDOUT_SHAPES)
+    heldout = [flags for group, _, flags in cases() if group == "heldout"]
+    assert len(heldout) == 7 * 3 * 3
+    for flags in heldout:
+        shape = (int(flags[flags.index("--d") + 1]), int(flags[flags.index("--segments") + 1]),
+                 int(flags[flags.index("--total-elements") + 1]))
+        assert shape in HELDOUT_SHAPES and shape not in fitted
+        assert flags[flags.index("--methods") + 1:] == ["ragged-classified", "ragged-naive", "ragged-auto"]
 
 
 class FakeTorch:
@@ -128,7 +144,7 @@ def test_summary_reports_cuda_graph_replays_beside_the_complete_call(tmp_path):
         cell["cuda_graph"] = {"status": "measured", "replay_cuda_event_ms": {"median": 0.015 + rep * 0.001}}
         failed = _cell("triton", 0.030)
         failed["cuda_graph"] = {"status": "failed", "error": "RuntimeError: capture"}
-        _write(tmp_path, "main", "sum-f32-d1-uniform", 711, rep, [cell, failed])
+        _write(tmp_path, "compare", "sum-f32-d1-uniform", 711, rep, [cell, failed])
     methods = summarize(tmp_path)["cases"][0]["methods"]
     assert methods["ragged-auto"]["graph"]["median_us"] == 16.0
     assert methods["ragged-auto"]["warm"]["median_us"] == 33.0
