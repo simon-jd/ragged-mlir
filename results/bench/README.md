@@ -23,6 +23,9 @@ Measured on an RTX 4090 (driver 595.99, CUDA 13.2) at commit
   and `evaluation.txt` (`python -m bench.calibrate evaluate results/bench/runs
   --seeds 713`, then all three seeds): both schedules, the chosen one and the
   adaptive call per workload and seed.
+- `runs/heldout/` and `calibration/heldout-shapes.txt`: the cost model on
+  seven shapes it was not fitted on, fixed in `bench/suite.py`
+  (`HELDOUT_SHAPES`) before they were measured (below).
 - `profile.txt`: Nsight Systems kernel traces of both schedules on seed 711's
   inputs, warm and cold L2.
 - `host.txt`: host time per call of both schedules.
@@ -34,3 +37,34 @@ power and utilization before its first method and after each one, and the
 host load average (SM clock 2,520 to 2,805 MHz, memory clock 10,251 to
 10,501 MHz, 37 to 64 °C over the suite). Paths in the records are relative to
 the checkout.
+
+## The cost model on held-out shapes
+
+`python -m bench.suite --groups heldout --repetitions 3` at commit
+`a7a1428` (567 runs: 7 shapes × sum, max, softmax × uniform, long-tail,
+bursty × seeds 711 to 713 × 3 repetitions), then `python -m bench.calibrate
+evaluate results/bench/runs --group heldout --seeds 711 712 713`
+(`calibration/heldout-shapes.txt`). The fitted shapes are D=1 with 16,384
+segments in 1,048,576 rows and D=128 with 4,096 segments in 262,144 rows. Per
+shape, over its 27 (workload, seed) inputs, the adaptive call against the
+faster of the two schedules measured in the same runs, warm L2:
+
+| D | Segments | Rows | Within 3% | Median excess | Largest excess |
+|---:|---:|---:|---:|---:|---|
+| 1 | 4,096 | 1,048,576 | 14 of 27 | +2.1% | +62% (softmax, uniform) |
+| 1 | 65,536 | 1,048,576 | 0 of 27 | +24.9% | +115% (softmax, long tail) |
+| 32 | 8,192 | 524,288 | 18 of 27 | +0.2% | +41% (max, uniform) |
+| 64 | 4,096 | 262,144 | 17 of 27 | +0.3% | +80% (max, long tail) |
+| 128 | 1,024 | 262,144 | 26 of 27 | +0.0% | +3.3% (max, uniform) |
+| 128 | 16,384 | 262,144 | 19 of 27 | +0.2% | +14% (softmax, long tail) |
+| 256 | 2,048 | 131,072 | 21 of 27 | +0.4% | +8.0% (sum, bursty) |
+
+In all, 115 of 189 inputs are within 3% warm and 101 of 189 cold. The
+model's two systematic errors: with 65,536 segments at D=1 it always runs
+block per segment, which is 12 to 115% slower than classification; at D=32
+and D=64 with uniform lengths it classifies the sum and max, 35 to 41% slower
+than block per segment (and runs block per segment for the D=32 uniform
+softmax, 19 to 20% slower). The D=1 shapes are also the noisiest: their calls
+take 24 to 167 µs, much of it host time, and in 7 of their 162 (workload,
+seed, method) cells one run is 1.5 to 2.5 times the cell's median, which
+three repetitions per seed do not always outvote.

@@ -108,14 +108,28 @@ term do. On the held-out seed 713 the adaptive call is at most 1.1% slower
 than `ragged-naive` with a warm L2, and over all 15 runs at most 1.4% (the
 D=1 bursty sum, 32.7 against 32.3 µs, where both run the same kernel); it
 classifies, and is 17 to 34% faster than block per segment, on the uniform
-D=128 sum and max and the long-tail D=128 softmax (`evaluation.txt`).
+D=128 sum and max and the long-tail D=128 softmax (`evaluation.txt`). A
+held-out seed is a weak test: the seed changes the segment lengths only of
+the 7 long-tail workloads. Uniform lengths are the same for every seed and
+bursty ones differ only in where the burst starts, so the other 12 held-out
+inputs have the training inputs' lengths.
 
 **Cost.** A second compile per specialization and a second module per
 program. The model is calibrated on warm times of two shapes and three
 length distributions on one GPU: with a cold L2 it classifies the uniform
 D=128 sum, max and softmax, where block per segment is 4.7 to 5.1% faster
-(229 against 218 µs for the sum), and other shapes, distributions and GPUs
-are extrapolation. Without `max_len` the program pays classification's cost
+(229 against 218 µs for the sum). On seven shapes it was not fitted on,
+fixed before they were measured (`calibration/heldout-shapes.txt`: D = 32,
+64 and 256, and D = 1 and 128 with four times fewer and more segments; 63
+workloads, 3 seeds), the adaptive call is within 3% of the faster schedule
+for 115 of 189 inputs with a warm L2 and 101 cold. The misses are
+systematic, not noise: at D=1 with 65,536 segments (16 rows on average) it
+always runs block per segment, which is 12 to 115% slower than
+classification there; at D=32 and D=64 with uniform lengths it classifies
+the sum and max, 35 to 41% slower than block per segment. At D=128 with
+1,024 segments it is within 3% for 26 of 27 inputs, at D=256 for 21 of 27.
+Two fitted shapes do not pin down how either schedule scales with D and the
+mean segment length; other distributions and GPUs are untested. Without `max_len` the program pays classification's cost
 everywhere. A wrong `max_len` costs time, never correctness, because both
 schedules are exact against the oracle.
 
