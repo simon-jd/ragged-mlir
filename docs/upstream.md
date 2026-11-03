@@ -10,9 +10,13 @@ The source package is LLVM/MLIR 23.1.3, SHA256 and commit recorded in
 digest before extraction and builds a separate `.deps/llvm-build` directory.
 There are currently no patches. The original upstream source is not modified.
 
-The `vector.transfer_read` lowering failure of LLVM issue #214404 reproduces on
-release 23.1.3; LLVM main has not been tested, and no fix or contribution has
-been submitted upstream. No issue
-comments, assignments or pull requests have been sent. The corresponding
-32-bit shuffle workaround is what the warp class uses; the GPU tests cover it.
-
+The lowering emits `vector.load` and `vector.store` for vector access, never
+`vector.transfer_read` (`test/Conversion/cta.mlir` checks this): the default
+GPU-to-NVVM pipeline leaves a rank-1 `vector.transfer_read` in a `gpu.module`
+unlowered, as reported in
+[llvm/llvm-project#214404](https://github.com/llvm/llvm-project/issues/214404)
+(opened by another user; this project has not commented on it or sent a fix).
+The issue's reproducer, run through `gpu-lower-to-nvvm-pipeline` with the
+LLVM 23.1.3 SDK's `mlir-opt`, fails the same way here ("LLVM Translation
+failed for operation: builtin.unrealized_conversion_cast"); LLVM main has
+not been tried.
