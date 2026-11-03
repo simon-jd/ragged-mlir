@@ -19,7 +19,8 @@ def native_environment():
 
 
 @pytest.mark.parametrize('method,d', [('cuda-naive', 1), ('cuda-naive', 7),
-                                     ('cuda-naive', 128), ('cuda-naive', 1024), ('cub', 1)])
+                                     ('cuda-naive', 128), ('cuda-naive', 1024), ('cub', 1),
+                                     ('cub', 7), ('cub', 128)])
 @pytest.mark.parametrize('op', ['sum', 'max', 'softmax'])
 @pytest.mark.parametrize('dtype', ['f32', 'bf16'])
 @pytest.mark.parametrize('bits', [32, 64])

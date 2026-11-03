@@ -1,6 +1,8 @@
 // Comparison-only code: never linked into the MLIR compiler or runtime.
 #include <cub/device/device_segmented_reduce.cuh>
 #include <cub/version.cuh>
+#include <thrust/iterator/counting_iterator.h>
+#include <thrust/iterator/transform_iterator.h>
 #include <cuda_runtime.h>
 #include <math_constants.h>
 #include <cstdint>
@@ -190,5 +192,68 @@ extern "C" int ragged_cub_normalize(int64_t n, const float *exp_values, const in
   if (n < 0) return cudaErrorInvalidValue;
   if (!n) return cudaSuccess;
   normalize<<<element_blocks(n), kThreads, 0, static_cast<cudaStream_t>(stream)>>>(exp_values, segment_ids, total, out, n);
+  return cudaGetLastError();
+}
+
+// D > 1 with CUB: the caller transposes values to feature-major [D, N], so
+// feature f of segment b is the contiguous run [f*N + offsets[b],
+// f*N + offsets[b+1]); CUB reduces all D*B of them, segment s = f*B + b.
+template <typename Offset>
+struct FeatureBound {
+  const Offset *offsets;
+  int64_t b, n;
+  int shift;  // 0: begin, 1: end
+  __host__ __device__ int64_t operator()(int64_t s) const {
+    return (s / b) * n + static_cast<int64_t>(offsets[s % b + shift]);
+  }
+};
+template <typename Offset>
+cudaError_t reduce_features(int op, void *scratch, size_t &bytes, const float *input, const Offset *offsets,
+                            float *out, int64_t b, int64_t n, int64_t d, cudaStream_t stream) {
+  thrust::counting_iterator<int64_t> segments(0);
+  auto begin = thrust::make_transform_iterator(segments, FeatureBound<Offset>{offsets, b, n, 0});
+  auto end = thrust::make_transform_iterator(segments, FeatureBound<Offset>{offsets, b, n, 1});
+  const int count = static_cast<int>(b * d);
+  if (op == 0)
+    return cub::DeviceSegmentedReduce::Reduce(scratch, bytes, input, out, count, begin, end, Add{}, 0.0f, stream);
+  return cub::DeviceSegmentedReduce::Reduce(scratch, bytes, input, out, count, begin, end, PropagateMax{},
+                                            -std::numeric_limits<float>::infinity(), stream);
+}
+extern "C" int ragged_cub_reduce_features(int op, int bits, int64_t b, int64_t n, int64_t d,
+                                          const float *input, const void *offsets, float *out,
+                                          void *scratch, size_t *bytes, void *stream) {
+  if (!valid(op, bits, b, d) || op == 2 || !bytes || n < 0 || b * d > INT32_MAX) return cudaErrorInvalidValue;
+  if (!b) { *bytes = 0; return cudaSuccess; }
+  auto s = static_cast<cudaStream_t>(stream);
+  if (bits == 32)
+    return reduce_features(op, scratch, *bytes, input, static_cast<const int32_t *>(offsets), out, b, n, d, s);
+  return reduce_features(op, scratch, *bytes, input, static_cast<const int64_t *>(offsets), out, b, n, d, s);
+}
+
+// Element-parallel exp(x - max) over feature-major [D, N] values, recording
+// each element's segment f*B + b for the division.
+template <typename Offset>
+__global__ void shifted_exp_features(const float *input, const Offset *offsets, const float *maximum,
+                                     float *exp_values, int32_t *segment_ids, int64_t n, int64_t b, int64_t d) {
+  for (int64_t i = blockIdx.x * static_cast<int64_t>(blockDim.x) + threadIdx.x; i < n * d;
+       i += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+    int64_t feature = i / n;
+    int32_t segment = static_cast<int32_t>(feature * b + segment_of(offsets, b, i - feature * n));
+    segment_ids[i] = segment;
+    exp_values[i] = expf(input[i] - maximum[segment]);
+  }
+}
+extern "C" int ragged_cub_shifted_exp_features(int bits, int64_t b, int64_t n, int64_t d, const float *input,
+                                               const void *offsets, const float *maximum, float *exp_values,
+                                               int32_t *segment_ids, void *stream) {
+  if (!valid(0, bits, b, d) || n < 0 || b * d > INT32_MAX) return cudaErrorInvalidValue;
+  if (!n) return cudaSuccess;
+  auto s = static_cast<cudaStream_t>(stream);
+  if (bits == 32)
+    shifted_exp_features<<<element_blocks(n * d), kThreads, 0, s>>>(
+        input, static_cast<const int32_t *>(offsets), maximum, exp_values, segment_ids, n, b, d);
+  else
+    shifted_exp_features<<<element_blocks(n * d), kThreads, 0, s>>>(
+        input, static_cast<const int64_t *>(offsets), maximum, exp_values, segment_ids, n, b, d);
   return cudaGetLastError();
 }

@@ -23,11 +23,16 @@ for empty segments, outputs cast back to the input dtype, offsets assumed valid
     f32 sums, NaN-propagating max) and a shared-memory tree combines the row
     lanes. Softmax makes three passes over the segment (max, sum of
     exponentials, normalize) inside the same block.
-  - `cub`, at D=1: CUB 3.5 `DeviceSegmentedReduce` sum and max with a
+  - `cub`: CUB 3.5 `DeviceSegmentedReduce` sum and max with a
     NaN-propagating max operator. Softmax is CUB's segmented max, an
     element-parallel kernel for `exp(x - max)` that finds each element's
     segment by binary search over the offsets, CUB's segmented sum of those
-    values, and an element-parallel division.
+    values, and an element-parallel division. CUB reduces contiguous runs, so
+    at D>1 the call first transposes the values to feature-major `[D, N]`
+    (feature f of segment b is then the run starting at `f*N + offsets[b]`),
+    reduces all D·B runs in one CUB call whose begin and end offsets are
+    computed by transform iterators, and transposes the `[D, B]` result (for
+    softmax, the `[D, N]` output) back. Both transposes are part of the call.
 
   Each call includes bf16 promotion, CUB workspace queries and allocation,
   every kernel and the output cast.

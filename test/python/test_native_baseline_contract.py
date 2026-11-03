@@ -1,10 +1,8 @@
 """Real native-library loading and host preflight; never claims device success."""
 import ctypes
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-from bench.run import make_call, NotApplicable
 from baselines.native import NativeBaselines
 
 
@@ -35,9 +33,16 @@ def test_native_empty_calls_need_no_device(baseline):
     assert count.value == 0
 
 
-def test_unsupported_cub_feature_width_is_explicit_na_before_loading():
-    with pytest.raises(NotApplicable, match='D=1'):
-        make_call('cub', SimpleNamespace(d=128), None, None, None, None)
+def test_feature_major_cub_rejects_invalid_shapes_and_needs_no_device_when_empty(baseline):
+    count = ctypes.c_size_t(42)
+    assert baseline.lib.ragged_cub_reduce_features(0, 64, 0, 0, 128, None, None, None, None,
+                                                   ctypes.byref(count), None) == 0
+    assert count.value == 0
+    # Softmax is not a CUB reduction, and D*B must fit CUB's i32 segment count.
+    assert baseline.lib.ragged_cub_reduce_features(2, 64, 1, 1, 128, None, None, None, None,
+                                                   ctypes.byref(count), None) != 0
+    assert baseline.lib.ragged_cub_reduce_features(0, 64, 2**24, 1, 1024, None, None, None, None,
+                                                   ctypes.byref(count), None) != 0
 
 
 def test_native_adapter_rejects_real_cpu_tensors(baseline):

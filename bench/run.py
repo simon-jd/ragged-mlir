@@ -122,14 +122,13 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
                                "row count with a combine kernel; online softmax")
         return call, metadata
     if method in ("cuda-naive", "cub"):
-        if method == "cub" and args.d != 1:
-            raise NotApplicable("the CUB segmented baseline is defined for D=1")
         from baselines.native import NativeBaselines
         baseline = NativeBaselines(args.native_library)
         mapping = {"cuda-naive": "one 256-thread block per segment; threads over rows and up to 32 feature columns; "
                                  "shared-memory tree; softmax in three passes",
                    "cub": "CUB DeviceSegmentedReduce sum and max; softmax: CUB max, element-parallel exp, "
-                          "CUB sum, element-parallel division"}[method]
+                          "CUB sum, element-parallel division; D>1 on a feature-major copy, one CUB segment "
+                          "per (feature, segment), transposed back"}[method]
         return (lambda: baseline_output(baseline.call(method, baseline_input(), offsets, args.op)),
                 {**baseline.provenance, "mapping": mapping})
     if method.startswith("ragged-"):
