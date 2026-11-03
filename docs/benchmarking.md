@@ -19,15 +19,16 @@ per run, in groups:
 including each workload's result against the fastest comparison (a win
 below 0.97 times its time, a tie within 3%, a loss above), and
 `bench/calibrate.py` fits the cost model that chooses ragged's schedule per
-call and evaluates it on held-out seeds and shapes.
+call on the main and first held-out runs and evaluates it on the second
+held-out set, which is run with the fitted model.
 
 ```sh
-python -m bench.suite --groups main --seeds 711 712 --methods ragged-classified ragged-naive \
-    --output build/calibration --lock /var/tmp/gpu.lock                # 190 processes
-python -m bench.calibrate fit build/calibration --train 711 712 --output python/ragged/cost_model.json
 python -m bench.suite --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600   # 1,155 processes
+python -m bench.suite --groups heldout --repetitions 3 --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
+python -m bench.calibrate fit build/runs --groups main heldout --output python/ragged/cost_model.json
+python -m bench.suite --groups heldout2 --repetitions 3 --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
 python -m bench.summarize build/runs --output results/bench/summary.json
-python -m bench.calibrate evaluate build/runs --seeds 713
+python -m bench.calibrate evaluate build/runs --group heldout2
 ```
 
 Each `results.json` records the command that produced it, the git commit of

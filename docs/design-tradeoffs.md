@@ -81,12 +81,13 @@ L, and the call runs the faster schedule. The terms are a fixed cost, the
 elements N·D, the elements each thread of the block that owns the longest
 segment reads (L × features per tile / 128, the critical path of block per
 segment), the segment count, the elements weighted by log2 of the skew
-L/(N/B), and the bytes. Nonnegative coefficients per operation family (sum
-and max; softmax) and schedule are fitted to seeds 711 and 712 of the 19
-benchmark workloads, warm L2 (`bench/calibrate.py`,
-`calibration/fit.txt`); the margin by which classification must win is the
-smallest that never picks it on a training input where it measured more
-than 2% slower, which came out as zero. L comes from the caller
+L/(N/B), and the MiB of the working set (input rows plus output) beyond the
+72 MiB L2. Nonnegative coefficients per operation family (sum and max;
+softmax) and schedule are fitted to warm times of 246 inputs in nine
+shapes: the 19 benchmark workloads and the 63 of the first held-out set,
+seeds 711 to 713 (`bench/calibrate.py`, `calibration/fit.txt`). The margin
+by which classification must win is chosen by leave-one-shape-out
+cross-validation and came out as zero. L comes from the caller
 (`run(max_len=...)`); without it the program classifies.
 
 **Alternatives.** Always classify (the previous behavior, still the
@@ -101,35 +102,72 @@ multiplications on the host. A device readback would add a synchronization
 to every call (and cannot run during CUDA graph capture), a per-tensor cache
 would act on stale statistics when offsets change in place, and launching
 both schedules' kernels would add the other schedule's launches to every
-call. The first terms (commit 3da3292: bytes, L × D, B) could not separate uniform
-D=128 inputs, where block per segment is slow (many short blocks), from
-bursty ones, where it is fast; the per-thread critical path and the skew
-term do. On the held-out seed 713 the adaptive call is at most 1.1% slower
-than `ragged-naive` with a warm L2, and over all 15 runs at most 1.4% (the
-D=1 bursty sum, 32.7 against 32.3 µs, where both run the same kernel); it
-classifies, and is 17 to 34% faster than block per segment, on the uniform
-D=128 sum and max and the long-tail D=128 softmax (`evaluation.txt`). A
-held-out seed is a weak test: the seed changes the segment lengths only of
-the 7 long-tail workloads. Uniform lengths are the same for every seed and
-bursty ones differ only in where the burst starts, so the other 12 held-out
-inputs have the training inputs' lengths.
+call.
+
+**The first fit and its two misses.** Version 1
+(`calibration/cost_model-v1.json`, `calibration/fit-v1.txt`) was fitted on
+seeds 711 and 712 of the benchmark workloads alone: two shapes, D=1 with
+16,384 segments and D=128 with 4,096. Its sixth term was the row bytes,
+which for f32 is the element count again. It stayed within 1.4% of
+`ragged-naive` on those shapes but was within 3% of the faster schedule for
+only 115 of 189 inputs on seven held-out shapes (`heldout-shapes.txt`),
+with two systematic misses that the traces in `profile.txt` explain:
+
+- *D=1 with 65,536 segments of 16 rows on average: it ran block per segment,
+  12 to 115% slower.* In the training data the segment count moved with D,
+  so the fit could not tell a per-segment cost from what else separates a
+  D=1 call from a D=128 one. Classification's fit had no constant, and its
+  per-segment term (2.34 µs per thousand segments) carried the fixed cost of
+  a classified call, 24 µs of host time for six launches and a stream fork
+  (`host.txt`) plus the init and classify kernels. At four times the
+  segments it predicted 158 µs for classification and 112 for block per
+  segment; they take 57 and 71. What grows with the segment count is block
+  per segment's kernel, one 128-thread block per segment (12 resident per
+  SM, so 65,536 blocks are 43 waves on 128 SMs): 53.6 µs here against 14.8
+  µs for 16,384 segments of 64 rows, while the classified span stays at 30
+  µs (the warp class takes 16-row segments, a warp each).
+- *Uniform D=32 and D=64 sum and max: it classified, 35 to 41% slower.*
+  Both per-element coefficients came from the D=128 inputs, 128 MiB that do
+  not fit the L2 (block per segment's kernel reads them at 0.9 TB/s), where
+  classification's persistent workers read faster (1.0 against 1.2 µs per
+  2^18 elements). The 64 MiB D=32 and D=64 inputs stay in the L2 between
+  calls: block per segment's kernel takes 16 µs, the classified span 25 to
+  27 µs, and the call is decided by classification's fixed cost (48 against
+  35 µs), not by the bytes. The model had no term that knew the L2 size.
+
+Refitted on those shapes as well, with the bytes beyond the L2 as the sixth
+term (version 2), the fixed costs separate from the per-segment ones (36
+µs and 0.31 µs per thousand segments for classified sums and maxes, 21 µs
+and 0.72 µs for block per segment), and elements that stay in the L2 cost
+0.11 and 0.16 µs per 2^18 against 1.8 and 2.0 µs per MiB beyond it.
+In-sample it is within 3% for 160 of the 189 first held-out inputs and 50
+of the 57 benchmark ones (`refit-training.txt`).
+
+**Evaluation.** Since the first held-out inputs had informed the change, a
+second held-out set was fixed and committed before the refitted model ran
+(`HELDOUT2_SHAPES`): 8 shapes, segment and row counts no earlier group
+used, D from 1 to 512, bimodal and exponential lengths, 144 inputs. Run
+with version 2 and evaluated once (`calibration/heldout2.txt`), the
+adaptive call is within 3% of the faster schedule for 112 of 144 inputs
+warm and 104 cold; replayed on the same runs, version 1's choices are
+within 3% for 61 and 65. Version 2 still misses systematically on the D=2
+bimodal sum and max (block per segment, 34 to 37% slower), the D=1 softmax
+with 200,000 segments (classification, 8 to 10%) and D=192 with 768
+segments (classification, 4 to 5%).
 
 **Cost.** A second compile per specialization and a second module per
-program. The model is calibrated on warm times of two shapes and three
-length distributions on one GPU: with a cold L2 it classifies the uniform
-D=128 sum, max and softmax, where block per segment is 4.7 to 5.1% faster
-(229 against 218 µs for the sum). On seven shapes it was not fitted on,
-fixed before they were measured (`calibration/heldout-shapes.txt`: D = 32,
-64 and 256, and D = 1 and 128 with four times fewer and more segments; 63
-workloads, 3 seeds), the adaptive call is within 3% of the faster schedule
-for 115 of 189 inputs with a warm L2 and 101 cold. The misses are
-systematic, not noise: at D=1 with 65,536 segments (16 rows on average) it
-always runs block per segment, which is 12 to 115% slower than
-classification there; at D=32 and D=64 with uniform lengths it classifies
-the sum and max, 35 to 41% slower than block per segment. At D=128 with
-1,024 segments it is within 3% for 26 of 27 inputs, at D=256 for 21 of 27.
-Two fitted shapes do not pin down how either schedule scales with D and the
-mean segment length; other distributions and GPUs are untested. Without `max_len` the program pays classification's cost
+program. The model sees N, B, D and the longest segment, not the
+distribution of lengths, so bursty and long-tail lengths of the same shape
+look alike: refitted, it classifies every seed of the bursty D=128 sum and
+max, 8% slower there than block per segment (181 against 168 µs), and those
+two benchmark workloads went from ties to losses against the fastest
+comparison. It is calibrated on warm times on one GPU, with that GPU's L2
+size as a constant: with a cold L2 it classifies the uniform D=128 sum, max
+and softmax, where block per segment is 5% faster. A margin against
+classification would move cold choices the right way but costs more warm:
+over the left-out shapes the mean excess over the faster schedule is 2.66%
+warm and 2.06% cold at no margin, and 3.21% and 1.84% at 2%, the best cold
+(`fit.txt`). Without `max_len` the program pays classification's cost
 everywhere. A wrong `max_len` costs time, never correctness, because both
 schedules are exact against the oracle.
 

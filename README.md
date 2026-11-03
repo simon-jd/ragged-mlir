@@ -8,19 +8,25 @@
 - On an RTX 4090, against the fastest of seven comparisons per workload
   (autotuned Triton, CUB, cuSPARSE, FBGEMM, `torch.segment_reduce`,
   compiled NJT and a CUDA block-per-segment kernel), it wins 4 of 19
-  workloads, ties 6 (within 3%) and loses 9 with a warm L2; with a cold L2 it
-  wins 1, ties 4 and loses 14; replaying each call as a CUDA graph, which
-  removes host overhead from every method, it wins 5, ties 6 and loses 8.
+  workloads, ties 4 (within 3%) and loses 11 with a warm L2; with a cold L2
+  it wins 1, ties 3 and loses 15; replaying each call as a CUDA graph, which
+  removes host overhead from every method, it wins 5, ties 4 and loses 10.
 - It wins the uniform D=128 sum and max and the uniform and long-tail D=1
   softmax. Its losses: the D=1 sum and max (1.1 to 2.2 times slower warm,
   1.1 to 3.1 times on graph replay), the long-tail D=128 sum, where cuSPARSE
-  is 1.13 times faster, and the bursty f32 and long-tail bf16 D=128 softmax,
-  where tuned Triton is 1.05 and 1.38 times faster.
-- The schedule choice stays within noise of the compiler's own
-  block-per-segment mode on the two benchmark shapes it was fitted on, but
-  extrapolates poorly: on seven held-out shapes the adaptive call is within
-  3% of the faster schedule for 115 of 189 inputs, and it is systematically
-  wrong at D=1 with 65,536 segments and at D=32 and 64 with uniform lengths.
+  is 1.13 times faster, the bursty D=128 sum and max (1.07 times), where the
+  cost model classifies although block per segment would tie, and the bursty
+  f32 and long-tail bf16 D=128 softmax, where tuned Triton is 1.05 and 1.38
+  times faster.
+- The schedule choice is a linear cost model. Fitted first on the two
+  benchmark shapes, it was within 3% of the faster schedule for only 115 of
+  189 inputs on seven held-out shapes. Refitted on all nine shapes, then run
+  on a second held-out set fixed beforehand (8 new shapes, D=1 to 512, 512
+  to 200,000 segments, bimodal and exponential lengths; 144 inputs), the
+  adaptive call is within 3% for 112 inputs warm and 104 cold, where the
+  first model's choices are within 3% for 61 and 65. It still misses
+  systematically on the D=2 bimodal sum and max (34 to 37% slower) and the
+  D=1 softmax with 200,000 segments (8 to 10%).
 - Each time is the median of 15 processes (3 seeds of the length distribution
   × 5 repetitions). Every method passes a float64 oracle before it is timed.
 
@@ -74,12 +80,12 @@ on the device.
   segment on one block. A classifying program therefore also compiles the
   block-per-segment specialization, and before each call a linear cost model
   (`python/ragged/selection.py`) predicts both complete-call times from N, B,
-  D, the longest segment and their skew, and runs the faster. Its
-  coefficients are fitted on two seeds of the benchmark workloads
-  (`bench/calibrate.py`, `results/bench/calibration/`) and evaluated on the
-  third and on seven shapes they were not fitted on
-  ([docs/design-tradeoffs.md](docs/design-tradeoffs.md)). The longest
-  segment comes from the caller; without it the program classifies.
+  D, the longest segment, their skew and the bytes that do not fit the L2,
+  and runs the faster. Its coefficients are fitted on the benchmark
+  workloads and seven further shapes (`bench/calibrate.py`,
+  `results/bench/calibration/`) and evaluated on eight shapes they were not
+  fitted on ([docs/design-tradeoffs.md](docs/design-tradeoffs.md)). The
+  longest segment comes from the caller; without it the program classifies.
 - **Scheduling.** Each persistent worker grid is one resident wave of that
   kernel, measured with the occupancy API when the module loads (on an RTX
   4090, up to 1,536 128-thread blocks or 3,072 warps, fewer for kernels with
@@ -159,16 +165,16 @@ a CUDA kernel with one block per segment. Clocks are not locked (SM clock
 | sum | 1 | long tail | C/N/N | 35 | cuSPARSE 22 | loss 1.56× | loss 1.20× vs CUB | 17, Triton 16 | loss 1.07× |
 | sum | 1 | bursty | N/N/N | 33 | cuSPARSE 23 | loss 1.47× | loss 1.16× vs CUB | 16, Triton 13 | loss 1.27× |
 | sum | 128 | uniform | C/C/C | 136 | torch.segment_reduce 155 | win 0.87× | loss 1.23× vs NJT compiled | 102, NJT compiled 143 | win 0.71× |
-| sum | 128 | long tail | C/N/C | 193 | cuSPARSE 170 | loss 1.13× | loss 1.14× vs cuSPARSE | 173, cuSPARSE 160 | loss 1.08× |
-| sum | 128 | bursty | N/N/N | 169 | cuSPARSE 169 | tie 1.00× | tie 1.02× vs cuSPARSE | 151, Triton 152 | tie 1.00× |
+| sum | 128 | long tail | C/C/C | 191 | cuSPARSE 169 | loss 1.13× | loss 1.15× vs cuSPARSE | 173, cuSPARSE 160 | loss 1.08× |
+| sum | 128 | bursty | C/C/C | 181 | cuSPARSE 169 | loss 1.07× | loss 1.07× vs cuSPARSE | 159, Triton 151 | loss 1.05× |
 | max | 1 | uniform | N/N/N | 34 | torch.segment_reduce 15 | loss 2.19× | loss 2.00× vs torch.segment_reduce | 16, NJT compiled 5.4 | loss 3.02× |
 | max | 1 | long tail | C/N/N | 34 | Triton 31 | loss 1.11× | tie 1.03× vs CUB | 16, Triton 13 | loss 1.23× |
 | max | 1 | bursty | N/N/N | 34 | CUB 27 | loss 1.26× | loss 1.18× vs CUB | 16, Triton 12 | loss 1.35× |
 | max | 128 | uniform | C/C/C | 134 | torch.segment_reduce 156 | win 0.86× | loss 1.22× vs NJT compiled | 102, NJT compiled 143 | win 0.71× |
-| max | 128 | long tail | C/N/C | 181 | Triton 180 | tie 1.01× | loss 1.03× vs Triton | 165, Triton 163 | tie 1.01× |
-| max | 128 | bursty | N/N/N | 169 | Triton 169 | tie 1.00× | tie 0.99× vs Triton | 151, Triton 151 | tie 0.99× |
+| max | 128 | long tail | C/C/C | 181 | Triton 180 | tie 1.00× | tie 1.02× vs Triton | 163, Triton 162 | tie 1.00× |
+| max | 128 | bursty | C/C/C | 181 | Triton 169 | loss 1.07× | loss 1.04× vs Triton | 158, Triton 151 | loss 1.05× |
 | softmax | 1 | uniform | N/N/N | 36 | NJT compiled 45 | win 0.80× | win 0.89× vs NJT compiled | 18, NJT compiled 26 | win 0.72× |
-| softmax | 1 | long tail | C/N/C | 56 | Triton 65 | win 0.87× | loss 1.09× vs Triton | 34, Triton 46 | win 0.73× |
+| softmax | 1 | long tail | C/C/C | 55 | Triton 65 | win 0.86× | loss 1.08× vs Triton | 34, Triton 46 | win 0.73× |
 | softmax | 1 | bursty | N/N/N | 37 | Triton 37 | tie 1.00× | loss 1.16× vs Triton | 18, Triton 19 | win 0.96× |
 | softmax | 128 | uniform | C/C/C | 311 | Triton 314 | tie 0.99× | loss 1.07× vs Triton | 288, Triton 296 | tie 0.97× |
 | softmax | 128 | long tail | C/C/C | 403 | Triton 392 | tie 1.03× | tie 1.02× vs Triton | 391, Triton 383 | tie 1.02× |
@@ -200,22 +206,40 @@ What the numbers say:
   persistent CTA workers take 134 to 136 µs against 155 for
   `torch.segment_reduce` (102 against 143 for compiled NJT on graph replay);
   on the D=1 softmax its one-pass online statistics beat compiled NJT and
-  Triton by 13 to 20%.
-- **With a cold L2 it mostly loses.** Compiled NJT is 1.2 times faster on the
-  uniform D=128 sum and max (187 against 230 µs), cuSPARSE 1.14 times on the
-  long-tail D=128 sum, Triton 1.06 to 1.31 times on the uniform, bursty and
-  bf16 D=128 softmax, CUB 1.2 times on the D=1 sums. The benchmark's flush leaves the L2 full of dirty lines,
-  which every method pays to write back ([results/bench/cold-l2.txt](results/bench/cold-l2.txt)).
+  Triton by 14 to 20%.
+- **With a cold L2 it mostly loses, mostly for reasons that are not the
+  cold L2.** 10 of the 15 cold losses are warm losses too: the five D=1 sum
+  and max losses (host time and short blocks), the long-tail and bursty
+  D=128 sum and the bursty D=128 max, and the bursty and bf16 D=128 softmax.
+  Of the other five, the uniform D=128 sum and max lose to compiled NJT, a
+  dense reduction under exact uniform bounds (187 against 230 µs):
+  classification's warm lead there is the part of the 128 MiB input that
+  back-to-back calls find in the L2, and cold even block per segment is
+  1.16 times slower than NJT, so this is inherent to the schedules. The cold
+  L2 costs the D=1 long-tail and bursty softmax 15 and 8 µs against 1 and 2
+  µs for Triton (not traced further). On the uniform D=128 softmax block per
+  segment would tie (331 against 324 µs for Triton, classified 348) but is
+  3% slower warm; the model does not know the L2 state. Only the schedule
+  choice was cheap to change: the refit turned the long-tail D=128 max from
+  a cold loss (1.03) into a tie, and a margin against classification gains
+  less cold than it costs warm
+  ([design-tradeoffs](docs/design-tradeoffs.md#choosing-classification-or-one-block-per-segment-per-call)).
+  The benchmark's flush leaves the L2 full of dirty lines, which every method
+  pays to write back ([results/bench/cold-l2.txt](results/bench/cold-l2.txt)).
 - **Classification versus one block per segment.** Forced classification
-  loses to block per segment in 10 of 19 warm workloads, and the per-call
-  choice removes those losses on the benchmark shapes (at most 1.4% above
-  `ragged-naive` over the 15 runs warm). That evaluation is weak: the seed
-  changes the lengths of only the 7 long-tail workloads. On seven shapes the
-  model was not fitted on, the choice is within 3% of the faster schedule for
-  115 of 189 inputs warm and 101 cold; it always runs block per segment at
-  D=1 with 65,536 segments (12 to 115% slower than classification there) and
-  classifies the uniform D=32 and D=64 sum and max (35 to 41% slower than
-  block per segment).
+  loses to block per segment in 10 of 19 warm workloads. The first cost
+  model, fitted on these two shapes, removed those losses here but on seven
+  other shapes was within 3% of the faster schedule for 115 of 189 inputs:
+  with 65,536 segments at D=1 its per-segment term, which had absorbed the
+  fixed cost of a call, predicted 158 µs for classification (57 measured),
+  and on the uniform D=32 and D=64 sum and max, whose 64 MiB inputs stay in
+  the L2, it charged DRAM time for every element and classified, 35 to 41%
+  slower ([profile.txt](results/bench/profile.txt): block per segment's
+  kernel takes 16 µs there). The refit, trained on those inputs too, gets
+  both right; on these workloads it
+  classifies the bursty D=128 sum and max, 8% slower than block per segment,
+  because N, B, D and the longest segment do not tell bursty from long-tail
+  lengths ([results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes)).
 
 ## Build and run
 
@@ -245,20 +269,21 @@ which the SDK does not ship ([docs/provenance.md](docs/provenance.md)).
 above writes a new one under `build/`; compare it with
 `results/bench/runs/main/softmax-bf16-d128-long_tail/seed-711/`. The
 `cuda-naive` and `cub` methods need the comparison library that
-`baselines/README.md` shows how to build. The cost model's calibration, the
-main suite (1,155 processes), the comparison and held-out-shape groups, the
-summary, the held-out evaluations and the chart:
+`baselines/README.md` shows how to build. The main suite (1,155
+processes) and the first held-out shapes, the cost model's fit on them, the
+comparison group and the second held-out set (run with the fitted model),
+the summary, the held-out evaluation of the fitted and of the previous
+model, and the chart:
 
 ```sh
-python -m bench.suite --groups main --seeds 711 712 --methods ragged-classified ragged-naive \
-    --output build/calibration --lock /var/tmp/gpu.lock --lock-batch 600
-python -m bench.calibrate fit build/calibration --train 711 712 --output python/ragged/cost_model.json
 python -m bench.suite --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
-python -m bench.suite --groups compare --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
 python -m bench.suite --groups heldout --repetitions 3 --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
+python -m bench.calibrate fit build/runs --groups main heldout --output python/ragged/cost_model.json
+python -m bench.suite --groups compare --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
+python -m bench.suite --groups heldout2 --repetitions 3 --output build/runs --lock /var/tmp/gpu.lock --lock-batch 600
 python -m bench.summarize build/runs --output build/summary.json
-python -m bench.calibrate evaluate build/runs --seeds 713
-python -m bench.calibrate evaluate build/runs --group heldout --seeds 711 712 713
+python -m bench.calibrate evaluate build/runs --group heldout2
+python -m bench.calibrate evaluate build/runs --group heldout2 --model results/bench/calibration/cost_model-v1.json
 python -m bench.chart build/summary.json --group compare --output build/speedup.svg
 ```
 
@@ -272,13 +297,16 @@ python -m bench.chart build/summary.json --group compare --output build/speedup.
   slower than one block per segment at D=1 (the `ragged, classified`
   column). Computing the statistics on the device would need a readback and a
   synchronization per call. A wrong `max_len` costs time, not correctness.
-- The cost model is linear in six terms and calibrated on warm times of the
-  benchmark's 19 workloads (two shapes, three length distributions) on one
-  GPU. With a cold L2 it picks classification for the uniform D=128 inputs
-  where block per segment is 5% faster. On seven held-out shapes it picks the
-  slower schedule by more than 3% for 74 of 189 inputs
-  ([results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes));
-  other distributions and GPUs are untested.
+- The cost model is linear in six terms and calibrated on warm times of 82
+  workloads in nine shapes (three length distributions) on one GPU, with the
+  RTX 4090's 72 MiB L2 as a constant. It sees N, B, D and the longest
+  segment, not the distribution of lengths: it classifies the bursty D=128
+  sum and max, 8% slower there than block per segment. On the second held-out
+  set it picks the slower schedule by more than 3% for 32 of 144 inputs
+  warm (40 cold), by 34 to 37% on the D=2 bimodal sum and max
+  ([results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes)).
+  With a cold L2 it classifies the uniform D=128 inputs where block per
+  segment is 5% faster. Other GPUs are untested.
 - Segment-class bounds (32 and 4,096 rows) and the 8-way split are fixed in the
   compiler and the classified ABI, not tuned per GPU or per D.
 - Vector access makes the bf16 long-tail softmax slower (302 against 264 µs
