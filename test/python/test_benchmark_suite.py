@@ -120,3 +120,16 @@ def test_summary_is_the_median_and_quartiles_of_per_run_medians(tmp_path):
     assert cub["statuses"] == {"failed": 1, "measured": 3} and cub["warm"]["runs"] == 3 and "cold" not in cub
     assert main["lengths_by_seed"] == {"711": [32, 32], "712": [32, 32]}
     assert summary["gpu_state"]["clocks.sm"] == [2520.0, 2760.0] and summary["host_loadavg_1min"] == [1.0, 3.0]
+
+
+def test_summary_reports_cuda_graph_replays_beside_the_complete_call(tmp_path):
+    for rep in range(3):
+        cell = _cell("ragged-auto", 0.033)
+        cell["cuda_graph"] = {"status": "measured", "replay_cuda_event_ms": {"median": 0.015 + rep * 0.001}}
+        failed = _cell("triton", 0.030)
+        failed["cuda_graph"] = {"status": "failed", "error": "RuntimeError: capture"}
+        _write(tmp_path, "main", "sum-f32-d1-uniform", 711, rep, [cell, failed])
+    methods = summarize(tmp_path)["cases"][0]["methods"]
+    assert methods["ragged-auto"]["graph"]["median_us"] == 16.0
+    assert methods["ragged-auto"]["warm"]["median_us"] == 33.0
+    assert "graph" not in methods["triton"] and methods["triton"]["reasons"] == ["cuda graph: RuntimeError: capture"]

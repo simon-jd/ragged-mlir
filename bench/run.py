@@ -277,6 +277,42 @@ def measure(call, torch, *, method, warmup, repeats, l2="warm", flush=None):
             "warmup_calls": warmup}
 
 
+def measure_graph(call, torch, *, repeats, check) -> dict:
+    """Capture one complete call in a CUDA graph and time its replays.
+
+    A replay launches the captured kernels without the Python and driver work
+    of a call, so the replay time separates GPU time from host overhead. The
+    captured output must pass the same oracle as the call itself.
+    """
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):   # warm up off the capture stream, as torch.cuda.graphs recommends
+        for _ in range(3):
+            warm = call()
+            del warm
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        result = call()
+    graph.replay()
+    torch.cuda.synchronize()
+    oracle = check(result)
+    for _ in range(5):
+        graph.replay()
+    samples = []
+    for _ in range(repeats):
+        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+        start.record()
+        graph.replay()
+        end.record()
+        end.synchronize()
+        samples.append(start.elapsed_time(end))
+    del result, graph
+    return {"status": "measured", "replay_cuda_event_ms": summarize(samples), "oracle": oracle,
+            "scope": "CUDA events around one replay of a graph captured from one complete call; warm L2"}
+
+
 def run(args) -> tuple[dict, int]:
     report = {"schema": 1, "status": "running", "timestamp_unix_ns": time.time_ns(),
               "command": list(os.sys.argv), "python": platform.python_version(), "methods": [],
@@ -344,6 +380,14 @@ def run(args) -> tuple[dict, int]:
             del result, actual
             cell.update(measure(call, torch, method=method, warmup=args.warmup, repeats=args.repeats,
                                 l2=l2, flush=flush))
+            if getattr(args, "cuda_graph", False):
+                def check(output):
+                    return assert_matches(output.float().cpu().numpy(), oracle_values, offsets,
+                                          operation=args.op, input_dtype=args.dtype)
+                try:
+                    cell["cuda_graph"] = measure_graph(call, torch, repeats=args.repeats, check=check)
+                except Exception as exc:   # a method that cannot be captured keeps its other timings
+                    cell["cuda_graph"] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:500]}
             execution_report = details.pop("_last_execution_report_object", None)
             if execution_report is not None:
                 details["last_execution_report"] = execution_report.to_dict()
@@ -398,6 +442,8 @@ def main():
     parser.add_argument("--l2", choices=L2_MODES, default="warm",
                         help="time with a warm L2, after flushing it before every call (cold), or both")
     parser.add_argument("--triton-cache", type=Path, help="shared Triton kernel cache (default: one per run)")
+    parser.add_argument("--cuda-graph", action="store_true",
+                        help="also time replays of a CUDA graph captured from one call (warm L2)")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--output", type=Path, required=True)

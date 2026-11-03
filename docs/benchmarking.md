@@ -100,6 +100,12 @@ unmeasured, not substituted.
 - `--mask` and `--scale` add the softmax mask and scale to every method.
 - `--fixed-segments` keeps the segment count and lets the element count vary;
   by default the element count is fixed.
+- `--cuda-graph` also captures one complete call of each method in a CUDA
+  graph, checks the captured output against the oracle and times 30 replays
+  (warm L2), recorded under `cuda_graph`. A replay runs the same kernels
+  without the Python and driver work of a call, so the difference from the
+  call time is the host's share. A method that cannot be captured keeps its
+  other timings and records the capture error.
 
 NVTX ranges named `ragged-benchmark/<method>/complete-call` mark each timed
 call for `nsys`. `python -m bench.profile` replays a saved case under Nsight

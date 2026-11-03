@@ -7,6 +7,8 @@ range (25th and 75th percentiles), in microseconds, with the number of runs
 and the median of each seed's runs (seeds change the segment lengths, which
 on the long-tail inputs changes the longest segment by an order of
 magnitude). A method that did not measure in every run lists its statuses.
+Runs with --cuda-graph add a "graph" state: replays of a CUDA graph captured
+from one call, which leave out the host's share of the call.
 
     python -m bench.summarize RUNS --output results/bench/summary.json
 """
@@ -20,7 +22,8 @@ from pathlib import Path
 import numpy as np
 
 TIMING = "complete_call_cuda_event_ms"
-MODES = {"warm": lambda cell: cell.get(TIMING), "cold": lambda cell: (cell.get("cold_l2") or {}).get(TIMING)}
+MODES = {"warm": lambda cell: cell.get(TIMING), "cold": lambda cell: (cell.get("cold_l2") or {}).get(TIMING),
+         "graph": lambda cell: (cell.get("cuda_graph") or {}).get("replay_cuda_event_ms")}
 
 
 def _spread(values):
@@ -83,7 +86,9 @@ def summarize(root: Path) -> dict:
                     record[mode]["by_seed_median_us"] = {seed: round(float(np.median(values)), 2)
                                                          for seed, values in sorted(by_seed.items())}
             reasons = sorted({cell.get("reason") or cell.get("error", "")[:200] for cell in method_cells
-                              if cell["status"] != "measured"})
+                              if cell["status"] != "measured"}
+                             | {"cuda graph: " + cell["cuda_graph"].get("error", "")[:200] for cell in measured
+                                if (cell.get("cuda_graph") or {}).get("status") == "failed"})
             if reasons:
                 record["reasons"] = reasons
             if method == "ragged-auto" and measured:
