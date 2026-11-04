@@ -1,49 +1,10 @@
 # Benchmark results
 
-Measured on an RTX 4090 (driver 595.99, CUDA 13.2). Every `results.json`
-under `runs/` records the commit it ran at under `source`: `f0bd690` for the
-main, hints and ablation groups, `a7a1428` for `heldout`, `2d69970` for
-`compare` (five of its workloads re-run at `6b0b842`, below) and `6b0b842`
-for `heldout2` (the commits between them do not change the generated
-kernels). The `ragged` (adaptive) method ran cost model version 1 in every
-group but `heldout2` and those five `compare` workloads, which ran version 2.
-
-- `runs/<group>/<case>/seed-<seed>/rep-<n>/results.json`: one `bench.run`
-  process each, from `python -m bench.suite --lock /var/tmp/rtx4090.lock
-  --lock-batch 600` (main: 19 workloads with every method, 6 with length
-  hints, 52 ablations; seeds 711 to 713; 5 repetitions; warm and cold L2),
-  and the `compare` and `heldout` groups (`--lock-batch 540`) and the
-  `heldout2` group and the five re-run `compare` workloads (`--lock-batch
-  480`, below). The GPU was shared with other projects, so the suite held
-  the lock for up to 10 minutes at a time and waited between batches.
-  `runs/suite.log` (and `runs/compare/suite.log`, `runs/heldout/suite.log`,
-  `runs/heldout2/suite.log`) lists every
-  process's exit code and duration; exit 1 means a method failed (the
-  tracebacks are beside the results), which here is always eager NJT.
-- `summary.json`: `python -m bench.summarize results/bench/runs --output
-  results/bench/summary.json`. For each method and L2 state it gives the
-  median over the 15 runs of each run's median call time, the 25th and 75th
-  percentiles, each seed's median, and for `ragged-auto` the schedule each
-  seed's runs chose.
-- `calibration/`: the cost model's fits and evaluations. Version 1: the 190
-  runs it was fitted to (`main/`, seeds 711 and 712, `ragged-classified` and
-  `ragged-naive`, at commit `686d9ce`), the model (`cost_model-v1.json`), its
-  fit (`fit-v1.txt`), `evaluation-v1.txt` (its choices on the main runs) and
-  `heldout-shapes.txt` (on the first held-out shapes). Version 2, the shipped
-  `python/ragged/cost_model.json`: its fit on `runs/main` and `runs/heldout`
-  (`fit.txt`, `python -m bench.calibrate fit results/bench/runs --groups main
-  heldout`), both versions' choices on those runs (`refit-training.txt`) and
-  the evaluation on the second held-out set (`heldout2.txt`).
-- `runs/heldout/` and `runs/heldout2/`: the two held-out sets, fixed in
-  `bench/suite.py` (`HELDOUT_SHAPES`, `HELDOUT2_SHAPES`) before the model
-  they evaluate was run on them (below).
-- `burst-gap/`: both ragged programs interleaved in one process on the D=1
-  bursty sum of each seed (below); `run.py` produced `results.json`.
-- `profile.txt`: Nsight Systems kernel traces of both schedules on seed 711's
-  inputs, warm and cold L2.
-- `host.txt`: host time per call of both schedules.
-- `cold-l2.txt`: a cold-L2 call after the benchmark's flush and after a flush
-  that only reads, which separates the write-back of the flush's dirty lines.
+Measured on an RTX 4090 (driver 595.99, CUDA 13.2). What each run tree and
+file holds, the commit it was measured at and the claim it backs are in
+[../README.md](../README.md). The `ragged` (adaptive) method ran cost model
+version 1 in every group but `heldout2` and five re-run `compare`
+workloads, which ran version 2.
 
 Clocks were not locked; each run records `nvidia-smi` clocks, temperature,
 power and utilization before its first method and after each one, and the
