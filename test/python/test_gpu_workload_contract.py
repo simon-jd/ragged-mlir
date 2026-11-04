@@ -1,6 +1,8 @@
 """Host validation of device-matrix inputs, without importing GPU fixtures."""
 import hashlib
 import json
+import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -8,7 +10,13 @@ import pytest
 from bench.distributions import offsets_from_lengths
 from oracle import validate_offsets
 from ragged import Hints, ProgramSpec
-from test.gpu.workload_cases import (
+
+# Import workload_cases the way test/gpu's own tests do, as a module of that
+# directory. Through "test.gpu" it fails wherever Python ships its standard
+# test package, which takes the name "test". Appended, so test/gpu's
+# test_selection.py cannot shadow this directory's.
+sys.path.append(str(Path(__file__).resolve().parents[1] / "gpu"))
+from workload_cases import (  # noqa: E402
     ANCHORS, BASE_ELEMENTS, LENGTH_SEED, MAX_ELEMENTS,
     SOURCES, SPLIT_FLOOR, classes_for, make_workload, save_failure,
 )
