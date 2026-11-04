@@ -51,7 +51,7 @@ on the device; length hints prune classes at compile time.
 **Why.** One block per segment puts a long segment on one SM. With the
 300,412-row segment of seed 711, `ragged-naive` takes 84 µs for the D=1 sum
 and 264 µs for the D=1 softmax, against 47 and 81 µs classified
-(`calibration/evaluation.txt`); the D=128 long-tail softmax takes 485 µs
+(`calibration/refit-training.txt`, main runs); the D=128 long-tail softmax takes 485 µs
 naive and 404 µs classified. Persistent CTA workers also beat many short
 blocks: on the uniform D=128 sum the 16,384 blocks of 64 rows take 149 µs,
 the CTA workers 101 µs (`profile.txt`). Sorting costs a full sort per call.

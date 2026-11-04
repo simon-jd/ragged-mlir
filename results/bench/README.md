@@ -28,7 +28,7 @@ group but `heldout2` and those five `compare` workloads, which ran version 2.
 - `calibration/`: the cost model's fits and evaluations. Version 1: the 190
   runs it was fitted to (`main/`, seeds 711 and 712, `ragged-classified` and
   `ragged-naive`, at commit `686d9ce`), the model (`cost_model-v1.json`), its
-  fit (`fit-v1.txt`), `evaluation.txt` (its choices on the main runs) and
+  fit (`fit-v1.txt`), `evaluation-v1.txt` (its choices on the main runs) and
   `heldout-shapes.txt` (on the first held-out shapes). Version 2, the shipped
   `python/ragged/cost_model.json`: its fit on `runs/main` and `runs/heldout`
   (`fit.txt`, `python -m bench.calibrate fit results/bench/runs --groups main
@@ -217,7 +217,7 @@ What the numbers say:
 - **Version 1's choice stays within noise of block per segment with a warm L2.**
   Over all 15 runs the adaptive median is at most 1.4% above `ragged-naive`
   (D=1 bursty sum, 32.7 against 32.3 µs, the same kernel); on the held-out
-  seed 713 at most 1.1% (`results/bench/calibration/evaluation.txt`). Where it
+  seed 713 at most 1.1% (`calibration/evaluation-v1.txt`). Where it
   classifies it is 17 to 34% faster than block per segment on the uniform
   D=128 sum and max and the long-tail D=128 softmax (f32 and bf16).
 - **With a cold L2 it is up to 5% slower than block per segment on uniform
@@ -430,7 +430,7 @@ against 13).
 
 ## Seed 711's bursty D=1 sum
 
-`calibration/evaluation.txt` shows the adaptive call 6.7% slower than
+`calibration/evaluation-v1.txt` shows the adaptive call 6.7% slower than
 `ragged-naive` on seed 711's bursty D=1 sum (32.8 against 30.7 µs), although
 both run the same kernel there. The seed does not change this workload's
 lengths, only where the burst of long segments starts, and four of the five
