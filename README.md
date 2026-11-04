@@ -1,42 +1,53 @@
 # ragged-mlir: an MLIR compiler for segmented reductions on ragged tensors
 
-- An out-of-tree MLIR compiler that generates CUDA kernels for segmented sum,
-  max and softmax over ragged tensors. Each call runs one of two compiled
-  schedules, chosen by a calibrated cost model from N, B, D and the longest
-  segment: a warp, block or multi-block mapping per segment chosen on the
-  device, or one block per segment.
-- On an RTX 4090, against the fastest of seven comparisons per workload
-  (autotuned Triton, CUB, cuSPARSE, FBGEMM, `torch.segment_reduce`,
-  compiled NJT and a CUDA block-per-segment kernel), it wins 4 of 19
-  workloads, ties 4 (within 3%) and loses 11 with a warm L2; with a cold L2
-  it wins 1, ties 3 and loses 15; replaying each call as a CUDA graph, which
-  removes host overhead from every method, it wins 5, ties 4 and loses 10.
-- It wins the uniform D=128 sum and max and the uniform and long-tail D=1
-  softmax. Its losses: the D=1 sum and max (1.1 to 2.2 times slower warm,
-  1.1 to 3.1 times on graph replay), the long-tail D=128 sum, where cuSPARSE
-  is 1.13 times faster, the bursty D=128 sum and max (1.07 times), where the
-  cost model classifies although block per segment would tie, and the bursty
-  f32 and long-tail bf16 D=128 softmax, where tuned Triton is 1.05 and 1.38
-  times faster.
-- The schedule choice is a linear cost model. Fitted first on the two
-  benchmark shapes, it was within 3% of the faster schedule for only 115 of
-  189 inputs on seven held-out shapes. Refitted on all nine shapes, then run
-  on a second held-out set fixed beforehand (8 new shapes, D=1 to 512, 512
-  to 200,000 segments, bimodal and exponential lengths; 144 inputs), the
-  adaptive call is within 3% for 112 inputs warm and 104 cold, where the
-  first model's choices are within 3% for 61 and 65. It still misses
-  systematically on the D=2 bimodal sum and max (34 to 37% slower) and the
-  D=1 softmax with 200,000 segments (8 to 10%).
-- Each time is the median of 15 processes (3 seeds of the length distribution
-  × 5 repetitions). Every method passes a float64 oracle before it is timed.
+ragged-mlir generates CUDA kernels for segmented sum, max and softmax over
+ragged tensors. Skewed segment lengths make any one mapping wasteful: one
+block per segment idles the GPU on a long segment, one warp per segment
+wastes it on short ones. ragged-mlir bins segments on the device into warp,
+block and multi-block workers, and a fitted cost model decides per call
+whether that binning beats plain block per segment.
 
-![ragged's speedup over the fastest comparison per workload, warm and cold L2](docs/speedup.svg)
+Scope: one RTX 4090 (sm_89), MLIR 23.1.3, CUDA 13.2; f32 and bf16;
+synthetic segment lengths, three seeds each.
+
+| Measure (warm L2 unless noted) | ragged | Baseline | Baseline value |
+|---|---:|---|---:|
+| Held-out inputs within 3% of the faster schedule, of 144 | 112 | first cost model | 61 |
+| The same, cold L2 | 104 | first cost model | 65 |
+| Uniform D=128 sum, µs | 136 | torch.segment_reduce | 155 |
+| Uniform D=1 softmax, µs | 36 | compiled NJT | 45 |
+| Uniform D=1 sum, µs (loss) | 34 | torch.segment_reduce | 15 |
+| Long-tail bf16 D=128 softmax, µs (loss) | 304 | tuned Triton | 221 |
+
+Rows 1 and 2: `results/bench/calibration/heldout2.txt`, on 8 shapes fixed
+before the refitted model ran. Rows 3 to 6: `results/bench/summary.json`
+(group `compare`), medians of 15 processes. On all 19 benchmark workloads
+ragged wins 4, ties 4 and loses 11 against the fastest of seven
+comparisons; the cost model was fitted on them, so that is in-sample.
+
+## Limitations
+
+- It loses 11 of the 19 benchmark workloads warm and 15 cold. The D=1 sum
+  and max are 1.1 to 2.2 times slower than the fastest comparison. Tuned
+  Triton is 1.38 times faster on the bf16 long-tail softmax.
+- The cost model sees N, B, D and the longest segment, not the length
+  distribution. On the held-out set it is more than 3% slower than the
+  faster schedule for 32 of 144 inputs warm (40 cold), by 34 to 37% on the
+  D=2 bimodal sum and max.
+- The schedule choice needs the longest segment (`max_len`) from the
+  caller; without it the program always classifies.
+- One shared GPU with unlocked clocks; sm_89 only; forward only.
+
+More: [how it works](#how-it-works) · [design trade-offs](docs/design-tradeoffs.md) ·
+[results](#results) · [all benchmark tables](results/bench/README.md) · [result files](results/README.md) ·
+[build and run](#build-and-run) · [all limitations](#limitations-in-detail)
+
+## Overview and usage
 
 Ragged (jagged) batches, a packed `[N, D]` tensor plus `B+1` segment offsets,
 are how variable-length sequences, graph neighborhoods and recommendation
 features reach a GPU. Reducing each segment (sum, max, softmax) is simple until
-the lengths are skewed: one block per segment leaves most of the GPU idle on a
-long segment, one warp per segment wastes it on short ones.
+the lengths are skewed.
 
 `ragged-mlir` is an out-of-tree compiler on MLIR 23.1.3 that generates CUDA
 kernels (sm_89) for segmented sum, max and softmax, picks a mapping per
@@ -44,6 +55,10 @@ segment on the device, and chooses per call whether that classification is
 worth its cost. It has its own dialect and passes, lowers through the GPU
 and NVVM dialects to PTX and `ptxas`, caches compiled artifacts, and launches
 them through the CUDA Driver API on PyTorch streams.
+
+Each call runs one of two compiled schedules: a warp, block or multi-block
+mapping per segment, chosen on the device, or one block per segment. The
+cost model picks between them from N, B, D and the longest segment.
 
 ```python
 from ragged import ArtifactCache, Compiler, ProgramSpec
@@ -127,37 +142,91 @@ on the device.
 
 ## Results
 
-**Correctness.** Numerical results in the GPU tests and the benchmark are
-checked against a float64 NumPy oracle with dtype-specific tolerances
-(`oracle/reference.py`). On an RTX 4090 (driver 595.99, CUDA 13.2)
-([results/tests/summary.txt](results/tests/summary.txt),
+### Correctness
+
+Numerical results in the GPU tests and the benchmark are checked against a
+float64 NumPy oracle with dtype-specific tolerances (`oracle/reference.py`).
+Every method passes it before it is timed. On an RTX 4090 (driver 595.99,
+CUDA 13.2) ([results/tests/summary.txt](results/tests/summary.txt),
 [results/sanitizer/summary.txt](results/sanitizer/summary.txt)):
 
 | Suite | Result |
 |---|---|
 | GPU tests (`test/gpu`): every op, dtype, D in {1, 2, 6, 7, 12, 16, 24, 40, 128, 1024}, i32/i64 offsets, five length distributions, empty segments, masks, in-place, checked offsets, streams, CUDA graph capture, Driver API faults; both schedules of the adaptive program and its choice; vector access compared bitwise against one feature per thread, row pipelining and concurrent classes against the rolled, serial schedule; misaligned tensors rejected; online and three-pass softmax in every class, including 65,536-row segments; class queues read back for counts, membership and per-warp order; the Triton, CUDA, CUB, cuSPARSE and FBGEMM comparisons | 2,330 passed; 30 strict xfails where FBGEMM's `jagged_softmax` returns NaN |
-| compute-sanitizer memcheck, racecheck, initcheck and synccheck on the classified, mask, checked-offsets, scheduling, selection and per-class softmax suites (671 tests, one process per suite and tool), at the same commit as the other suites | 0 errors, 0 hazards |
+| compute-sanitizer memcheck, racecheck, initcheck and synccheck on the classified, mask, checked-offsets, scheduling, selection and per-class softmax suites (671 tests, one process per suite and tool) | 0 errors, 0 hazards |
 | lit/FileCheck tests of the dialect, passes and lowering (`test/`) | 41 passed |
 | host tests (`test/python`): cache, manifest validation, runtime contracts and stream schedule, cost model and schedule choice, benchmark harness, suite and summary | 1,190 passed; CI runs them on a CPU runner ([workflow](.github/workflows/host-tests.yml)), where the 118 that need the compiler or the CUDA library skip |
 
-**Speed.** Complete-call GPU time in µs: CUDA events around the call, so host
-launch gaps count, median over 15 processes (seeds 711 to 713 of the length
-distribution × 5 repetitions) of each process's median of 30 calls. f32
-unless noted; 1M rows in 16,384 segments at D=1, 262,144 rows in 4,096
-segments at D=128; uniform (64 rows), long-tail (Pareto) and bursty lengths.
-**Warm** L2 is back-to-back calls; **cold** L2 overwrites a 288 MiB buffer and
-synchronizes before every call; **graph** replays a CUDA graph captured from
-one call, which runs the same kernels without the host's share of the call.
-`ragged` is the adaptive program, given the exact longest segment
-(`max_len`, the bound NJT also receives); *chose* is its schedule per seed
-711/712/713, C classification, N one block per segment. A result is a win
-when ragged takes less than 0.97 times the fastest comparison's time, a tie
-within 3%, a loss above. The comparisons ([baselines/README.md](baselines/README.md))
-are Triton autotuned on each input, CUB 3.5 (at D=128 on a transposed copy),
-cuSPARSE SpMM (sums), FBGEMM 1.9 (the D=1 sum and softmax),
-`torch.segment_reduce` (sum, max), compiled NJT with exact length bounds and
-a CUDA kernel with one block per segment. Clocks are not locked (SM clock
-2,520 to 2,805 MHz) and the GPU and host were shared with other work.
+All four ran at the same commit, after the cost-model refit.
+
+### The cost model on held-out shapes
+
+The schedule choice is a linear cost model (`python/ragged/selection.py`).
+Before each call it predicts both complete-call times and runs the faster.
+
+The first version was fitted on the two benchmark shapes. On seven held-out
+shapes it was within 3% of the faster schedule for only 115 of 189 inputs.
+
+The refit trained on those inputs too: 246 inputs in nine shapes. It was
+then evaluated once on a second held-out set, fixed beforehand: 8 new shapes, D=1 to
+512, 512 to 200,000 segments, bimodal and exponential lengths, 144 inputs.
+Inputs within 3% of the faster of the two schedules
+([results/bench/calibration/heldout2.txt](results/bench/calibration/heldout2.txt)):
+
+| L2 | Refitted model, as run | Refitted model's choices, replayed | First model's choices, replayed |
+|---|---:|---:|---:|
+| warm | 112 of 144 | 119 of 144 | 61 of 144 |
+| cold | 104 of 144 | 107 of 144 | 65 of 144 |
+
+"As run" is the adaptive call measured with the refitted model installed.
+"Replayed" applies a model's choices to the same runs' medians of the two
+forced schedules.
+
+It still misses systematically in two places. On the D=2 bimodal sum and
+max it runs block per segment, 34 to 37% slower than classification. On the
+D=1 softmax with 200,000 segments it classifies, 8 to 10% slower. The
+per-shape tables are in
+[results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes).
+
+### Speed on the 19 benchmark workloads (in-sample)
+
+These are the workloads the cost model was fitted on: the refitted model on
+all three seeds, the first model on seeds 711 and 712. So the *chose* column
+below is in-sample. The ablations behind the optimizations ran on them too.
+
+How the table was measured:
+
+- **Time.** Complete-call GPU time in µs: CUDA events around the call, so
+  host launch gaps count. Median over 15 processes (seeds 711 to 713 of the
+  length distribution × 5 repetitions) of each process's median of 30 calls.
+- **Inputs.** f32 unless noted. 1M rows in 16,384 segments at D=1; 262,144
+  rows in 4,096 segments at D=128. Uniform (64 rows), long-tail (Pareto)
+  and bursty lengths.
+- **L2 state.** *Warm* is back-to-back calls. *Cold* overwrites a 288 MiB
+  buffer and synchronizes before every call. *Graph* replays a CUDA graph
+  captured from one call: the same kernels without the host's share of the
+  call.
+- **ragged.** The adaptive program, given the exact longest segment
+  (`max_len`, the bound NJT also receives). *chose* is its schedule per seed
+  711/712/713: C classification, N one block per segment. Fourteen
+  workloads ran the first cost model. The five whose choice the refit
+  changes were re-run with the refitted one.
+- **Result.** A win when ragged takes less than 0.97 times the fastest
+  comparison's time, a tie within 3%, a loss above.
+- **Comparisons** ([baselines/README.md](baselines/README.md)). Triton
+  autotuned on each input, CUB 3.5 (at D=128 on a transposed copy),
+  cuSPARSE SpMM (sums), FBGEMM 1.9 (the D=1 sum and softmax),
+  `torch.segment_reduce` (sum, max), compiled NJT with exact length bounds
+  and a CUDA kernel with one block per segment.
+- **Conditions.** Clocks are not locked (SM clock 2,520 to 2,805 MHz). The
+  GPU and host were shared with other work.
+
+Against the fastest comparison, ragged wins 4 workloads, ties 4 and loses 11
+with a warm L2. With a cold L2 it wins 1, ties 3 and loses 15. On CUDA-graph
+replay, which removes host overhead from every method, it wins 5, ties 4 and
+loses 10.
+
+![ragged's speedup over the fastest comparison per workload, warm and cold L2](docs/speedup.svg)
 
 | Op | D | Lengths | chose | ragged | fastest comparison | warm | cold | CUDA graph replay: ragged, fastest | graph |
 |---|---:|---|---|---:|---|---|---|---|---|
@@ -186,60 +255,99 @@ forced classified schedule, the ablations, vector access, length hints, the
 cost model on held-out shapes and the kernel traces are in
 [results/bench/README.md](results/bench/README.md).
 
-What the numbers say:
+### Wins and losses
 
-- **At D=1 the sum and max lose, and not only to host time.** A warm call
-  takes 33 to 35 µs, of which the kernel is 14.4 to 14.8 µs
-  ([profile.txt](results/bench/profile.txt), [burst-gap](results/bench/README.md#seed-711s-bursty-d1-sum));
-  replayed as a graph it takes 16 to 17 µs. The comparisons gain as much from replay:
-  `torch.segment_reduce` takes 11 µs, Triton 12 to 16, and compiled NJT 5.4
-  µs on uniform lengths, where exact bounds turn it into a dense reduction.
-  One block per segment over 16,384 short segments is slower than their
-  kernels, not only their launch path.
-- **cuSPARSE is the strongest comparison for sums.** Its SpMM takes 22 to 23
-  µs at D=1 and 169 to 170 µs at D=128 for every length distribution, 1.13
-  times faster than ragged on the long-tail D=128 sum; on graph replay it
-  is slower than ragged at D=1 (22 against 16 to 17 µs). CUB at D=128 needs a
-  transpose and D·B segments and takes 1.2 to 4.2 ms; FBGEMM's D=1 sum takes
-  26 to 55 µs and its `jagged_softmax` 74 µs to 2.9 ms.
-- **ragged wins where its mapping matters.** On the uniform D=128 sum and max,
-  persistent CTA workers take 134 to 136 µs against 155 for
-  `torch.segment_reduce` (102 against 143 for compiled NJT on graph replay);
-  on the D=1 softmax its one-pass online statistics beat compiled NJT and
-  Triton by 14 to 20%.
-- **With a cold L2 it mostly loses, mostly for reasons that are not the
-  cold L2.** 10 of the 15 cold losses are warm losses too: the five D=1 sum
-  and max losses (host time and short blocks), the long-tail and bursty
-  D=128 sum and the bursty D=128 max, and the bursty and bf16 D=128 softmax.
-  Of the other five, the uniform D=128 sum and max lose to compiled NJT, a
-  dense reduction under exact uniform bounds (187 against 230 µs):
-  classification's warm lead there is the part of the 128 MiB input that
-  back-to-back calls find in the L2, and cold even block per segment is
-  1.16 times slower than NJT, so this is inherent to the schedules. The cold
-  L2 costs the D=1 long-tail and bursty softmax 15 and 8 µs against 1 and 2
-  µs for Triton (not traced further). On the uniform D=128 softmax block per
-  segment would tie (331 against 324 µs for Triton, classified 348) but is
-  3% slower warm; the model does not know the L2 state. Only the schedule
-  choice was cheap to change: the refit turned the long-tail D=128 max from
-  a cold loss (1.03) into a tie, and a margin against classification gains
-  less cold than it costs warm
-  ([design-tradeoffs](docs/design-tradeoffs.md#choosing-classification-or-one-block-per-segment-per-call)).
-  The benchmark's flush leaves the L2 full of dirty lines, which every method
-  pays to write back ([results/bench/cold-l2.txt](results/bench/cold-l2.txt)).
-- **Classification versus one block per segment.** Forced classification
-  loses to block per segment in 10 of 19 warm workloads. The first cost
-  model, fitted on these two shapes, removed those losses here but on seven
-  other shapes was within 3% of the faster schedule for 115 of 189 inputs:
-  with 65,536 segments at D=1 its per-segment term, which had absorbed the
-  fixed cost of a call, predicted 158 µs for classification (57 measured),
-  and on the uniform D=32 and D=64 sum and max, whose 64 MiB inputs stay in
-  the L2, it charged DRAM time for every element and classified, 35 to 41%
-  slower ([profile.txt](results/bench/profile.txt): block per segment's
-  kernel takes 16 µs there). The refit, trained on those inputs too, gets
-  both right; on these workloads it
-  classifies the bursty D=128 sum and max, 8% slower than block per segment,
-  because N, B, D and the longest segment do not tell bursty from long-tail
-  lengths ([results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes)).
+With a warm L2, ragged wins the uniform D=128 sum and max and the uniform
+and long-tail D=1 softmax. It loses:
+
+- the D=1 sum and max: 1.1 to 2.2 times slower warm, 1.1 to 3.1 times on
+  graph replay;
+- the long-tail D=128 sum, where cuSPARSE is 1.13 times faster;
+- the bursty D=128 sum and max, by 1.07 times, where the cost model
+  classifies although block per segment would tie;
+- the bursty f32 and long-tail bf16 D=128 softmax, where tuned Triton is
+  1.05 and 1.38 times faster.
+
+### D=1 sum and max lose, and not only to host time
+
+A warm call takes 33 to 35 µs. The kernel is 14.4 to 14.8 µs of it
+([profile.txt](results/bench/profile.txt),
+[burst-gap](results/bench/README.md#seed-711s-bursty-d1-sum)). Replayed as
+a graph, the call takes 16 to 17 µs.
+
+The comparisons gain as much from replay. `torch.segment_reduce` takes 11
+µs and Triton 12 to 16. Compiled NJT takes 5.4 µs on uniform lengths, where
+exact bounds turn it into a dense reduction.
+
+So one block per segment over 16,384 short segments is slower than their
+kernels, not only their launch path.
+
+### cuSPARSE is the strongest comparison for sums
+
+Its SpMM takes 22 to 23 µs at D=1 and 169 to 170 µs at D=128, for every
+length distribution. That is 1.13 times faster than ragged on the long-tail
+D=128 sum. On graph replay it is slower than ragged at D=1: 22 µs against
+16 to 17.
+
+CUB at D=128 needs a transpose and D·B segments; it takes 1.2 to 4.2 ms.
+FBGEMM's D=1 sum takes 26 to 55 µs, and its `jagged_softmax` 74 µs to 2.9
+ms.
+
+### ragged wins where its mapping matters
+
+On the uniform D=128 sum and max, persistent CTA workers take 134 to 136 µs
+against 155 for `torch.segment_reduce`. On graph replay they take 102 µs
+against 143 for compiled NJT.
+
+On the D=1 softmax, the one-pass online statistics beat compiled NJT and
+Triton by 14 to 20%.
+
+### With a cold L2 it mostly loses, mostly not because of the cold L2
+
+10 of the 15 cold losses are warm losses too: the five D=1 sum and max
+losses (host time and short blocks), the long-tail and bursty D=128 sum,
+the bursty D=128 max, and the bursty and bf16 D=128 softmax.
+
+The uniform D=128 sum and max lose to compiled NJT, 230 against 187 µs.
+Under exact uniform bounds NJT is a dense reduction. Classification's warm
+lead there is the part of the 128 MiB input that back-to-back calls find in
+the L2. Cold, even block per segment is 1.16 times slower than NJT, so this
+loss is inherent to the schedules.
+
+The cold L2 costs the D=1 long-tail and bursty softmax 15 and 8 µs, against
+1 and 2 µs for Triton. This was not traced further.
+
+On the uniform D=128 softmax, block per segment would tie cold (331 against
+324 µs for Triton; classified takes 348) but is 3% slower warm. The model
+does not know the L2 state.
+
+Only the schedule choice was cheap to change. The refit turned the
+long-tail D=128 max from a cold loss (1.03) into a tie. A margin against
+classification gains less cold than it costs warm
+([design-tradeoffs](docs/design-tradeoffs.md#choosing-classification-or-one-block-per-segment-per-call)).
+
+The benchmark's flush leaves the L2 full of dirty lines, which every method
+pays to write back ([results/bench/cold-l2.txt](results/bench/cold-l2.txt)).
+
+### Classification against one block per segment
+
+Forced classification loses to block per segment in 10 of 19 warm
+workloads. The first cost model, fitted on these two shapes, removed those
+losses here.
+
+On other shapes it made two errors. With 65,536 segments at D=1, its
+per-segment term, which had absorbed the fixed cost of a call, predicted
+158 µs for classification; 57 µs was measured. On the uniform D=32 and D=64
+sum and max, whose 64 MiB inputs stay in the L2, it charged DRAM time for
+every element and classified, 35 to 41% slower
+([profile.txt](results/bench/profile.txt): block per segment's kernel takes
+16 µs there).
+
+The refit, trained on those inputs too, gets both right. On these 19
+workloads it classifies the bursty D=128 sum and max, 8% slower than block
+per segment. N, B, D and the longest segment do not tell bursty from
+long-tail lengths
+([results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes)).
 
 ## Build and run
 
@@ -287,7 +395,7 @@ python -m bench.calibrate evaluate build/runs --group heldout2 --model results/b
 python -m bench.chart build/summary.json --group compare --output build/speedup.svg
 ```
 
-## Limitations
+## Limitations in detail
 
 - sm_89 only; one device per program; forward only (no autograd).
 - Validated mode trusts the offsets; checked mode validates them on the device

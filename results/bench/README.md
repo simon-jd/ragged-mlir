@@ -22,7 +22,10 @@ workloads, 285 runs (seeds 711 to 713, 5 repetitions), every comparison
 including CUB at D=128, cuSPARSE and FBGEMM, and a CUDA-graph replay of each
 method (`--cuda-graph`). µs, median over runs with the 25th to 75th
 percentile; – is not applicable. The README's summary table and chart come
-from these runs.
+from these runs. They are in-sample for the cost model: version 2 was fitted
+on all three seeds of these workloads (`runs/main`), version 1 on seeds 711
+and 712 (`calibration/main`), so the `ragged` column's schedule choices are
+not a held-out result; that is the second held-out set, below.
 
 Warm L2:
 
