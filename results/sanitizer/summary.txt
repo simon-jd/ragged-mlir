@@ -1,33 +1,36 @@
-compute-sanitizer 2026.1.1 (CUDA 13.2) on an RTX 4090 at commit f0bd6903feb5b75c52cd1857e666887a14ee9db7, one process per suite and tool:
+compute-sanitizer 2026.1.1 (CUDA 13.2) on an RTX 4090 at commit 0c4be17c68858e9d916531446cbbf89e9e6610d7 (the refitted
+cost model), one process per suite and tool, each under the GPU lock:
   compute-sanitizer --tool TOOL --target-processes all --error-exitcode 86 python -m pytest test/gpu/SUITE.py
 test_scheduling and test_selection ran with --target-processes application-only: under "all" the
 compiler subprocesses of their new specializations exceeded the 300 s compile timeout (16 failures,
-0 sanitizer errors); the kernels all run in the pytest process, which application-only still checks.
+0 sanitizer errors, in the earlier run at f0bd690); the kernels all run in the pytest process, which
+application-only still checks.
 Under racecheck, the eight stream-ordering tests that queue large matmuls ahead of a call
 (test_scheduling: observe_prior_work, 2; test_checked: observes_explicit_stream_prior_writes, 6) are
-deselected; they run under the other three tools.
+deselected with -k; they run under the other three tools.
+671 tests per tool (663 under racecheck), 0 errors and 0 hazards.
 
-initcheck-test_checked: 256 passed in 30.63s; ERROR SUMMARY: 0 errors
-initcheck-test_class_fusion: 22 passed in 17.45s; ERROR SUMMARY: 0 errors
-initcheck-test_classified: 127 passed in 44.57s; ERROR SUMMARY: 0 errors
-initcheck-test_mask: 150 passed in 65.68s (0:01:05); ERROR SUMMARY: 0 errors
-initcheck-test_scheduling: 86 passed in 108.69s (0:01:48); ERROR SUMMARY: 0 errors
-initcheck-test_selection: 30 passed in 9.65s; ERROR SUMMARY: 0 errors
-memcheck-test_checked: 256 passed in 45.65s; ERROR SUMMARY: 0 errors
-memcheck-test_class_fusion: 22 passed in 17.55s; ERROR SUMMARY: 0 errors
-memcheck-test_classified: 127 passed in 44.52s; ERROR SUMMARY: 0 errors
-memcheck-test_mask: 150 passed in 65.24s (0:01:05); ERROR SUMMARY: 0 errors
-memcheck-test_scheduling: 86 passed in 113.17s (0:01:53); ERROR SUMMARY: 0 errors
-memcheck-test_selection: 30 passed in 9.71s; ERROR SUMMARY: 0 errors
-racecheck-test_checked: 250 passed, 6 deselected in 34.13s; RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
-racecheck-test_class_fusion: 22 passed in 20.16s; RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
-racecheck-test_classified: 127 passed in 71.74s (0:01:11); RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
-racecheck-test_mask: 150 passed in 91.29s (0:01:31); RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
-racecheck-test_scheduling: 84 passed, 2 deselected in 126.71s (0:02:06); RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
-racecheck-test_selection: 30 passed in 26.69s; RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
-synccheck-test_checked: 256 passed in 29.85s; ERROR SUMMARY: 0 errors
-synccheck-test_class_fusion: 22 passed in 16.96s; ERROR SUMMARY: 0 errors
-synccheck-test_classified: 127 passed in 43.48s; ERROR SUMMARY: 0 errors
-synccheck-test_mask: 150 passed in 65.25s (0:01:05); ERROR SUMMARY: 0 errors
-synccheck-test_scheduling: 86 passed in 110.97s (0:01:50); ERROR SUMMARY: 0 errors
-synccheck-test_selection: 30 passed in 9.45s; ERROR SUMMARY: 0 errors
+initcheck-test_checked: 256 passed in 35.52s; ERROR SUMMARY: 0 errors
+initcheck-test_class_fusion: 22 passed in 19.24s; ERROR SUMMARY: 0 errors
+initcheck-test_classified: 127 passed in 50.21s; ERROR SUMMARY: 0 errors
+initcheck-test_mask: 150 passed in 71.48s (0:01:11); ERROR SUMMARY: 0 errors
+initcheck-test_scheduling: 86 passed in 120.87s (0:02:00); ERROR SUMMARY: 0 errors
+initcheck-test_selection: 30 passed in 10.66s; ERROR SUMMARY: 0 errors
+memcheck-test_checked: 256 passed in 52.96s; ERROR SUMMARY: 0 errors
+memcheck-test_class_fusion: 22 passed in 18.74s; ERROR SUMMARY: 0 errors
+memcheck-test_classified: 127 passed in 48.90s; ERROR SUMMARY: 0 errors
+memcheck-test_mask: 150 passed in 72.50s (0:01:12); ERROR SUMMARY: 0 errors
+memcheck-test_scheduling: 86 passed in 118.55s (0:01:58); ERROR SUMMARY: 0 errors
+memcheck-test_selection: 30 passed in 10.45s; ERROR SUMMARY: 0 errors
+racecheck-test_checked: 250 passed, 6 deselected in 38.64s; RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+racecheck-test_class_fusion: 22 passed in 22.06s; RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+racecheck-test_classified: 127 passed in 71.20s (0:01:11); RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+racecheck-test_mask: 150 passed in 93.95s (0:01:33); RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+racecheck-test_scheduling: 84 passed, 2 deselected in 131.10s (0:02:11); RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+racecheck-test_selection: 30 passed in 28.10s; RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)
+synccheck-test_checked: 256 passed in 35.38s; ERROR SUMMARY: 0 errors
+synccheck-test_class_fusion: 22 passed in 19.07s; ERROR SUMMARY: 0 errors
+synccheck-test_classified: 127 passed in 49.94s; ERROR SUMMARY: 0 errors
+synccheck-test_mask: 150 passed in 71.42s (0:01:11); ERROR SUMMARY: 0 errors
+synccheck-test_scheduling: 86 passed in 104.16s (0:01:44); ERROR SUMMARY: 0 errors
+synccheck-test_selection: 30 passed in 10.73s; ERROR SUMMARY: 0 errors

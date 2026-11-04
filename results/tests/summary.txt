@@ -1,17 +1,23 @@
-Test runs on home-ubuntu (RTX 4090, driver 595.99, CUDA 13.2).
+Test runs on home-ubuntu (RTX 4090, driver 595.99, CUDA 13.2), all at commit
+0c4be17c68858e9d916531446cbbf89e9e6610d7, which has the refitted cost model (python/ragged/selection.py and
+cost_model.json). The commits after it change only docs and result files.
 
-GPU tests at commit 2d699706fa98f18ab52a66164636c9f85352ea68, the commit the compare runs measured
-(PyTorch 2.14.1+cu132, Triton 3.8.0, FBGEMM_GPU 1.9.0+cu130):
+GPU tests (PyTorch 2.14.1+cu132, Triton 3.8.0, FBGEMM_GPU 1.9.0+cu130), under the GPU lock:
   PYTHONPATH=python:. RAGGED_COMPILE=build/bin/ragged-compile python -m pytest test/gpu
-  2,170 passed, 30 xfailed, 0 failed in 7.3 min
+  2,330 passed, 30 xfailed, 0 failed in 9.2 min, with an empty artifact cache
   The 30 strict xfails are FBGEMM jagged_softmax cases that return NaN: logits outside the
   offsets' integer range and +inf after a finite logit (test/gpu/test_fbgemm_baseline.py).
+  The one warning is PyTorch's notice that sparse CSR tensors are in beta (the cuSPARSE comparison).
+  The 160 tests more than at 2d69970 (2,170 passed, 30 xfailed) are the exponential length
+  distribution of the second held-out set, which the workload cases now include
+  (pytest test/gpu --collect-only -k exponential: 160 of 2,360).
+  nvidia-smi before and after: SM clock 210 and 2,520 MHz, memory clock 405 and 10,501 MHz, 33 and 43 C.
 
-Host tests and lit tests at commit 2d699706fa98f18ab52a66164636c9f85352ea68:
-  python -m pytest                  (test/python, CPU PyTorch 2.14.1)   1,173 passed
-  the same in a clean export without build outputs, as on the CPU CI runner: 1,055 passed, 118 skipped
+Host tests and lit tests:
+  python -m pytest                  (test/python, CPU PyTorch 2.14.1)   1,190 passed
+  the same in a clean export without build outputs, as on the CPU CI runner: 1,072 passed, 118 skipped
   ninja -C build check-ragged       (lit/FileCheck)                      41 passed
 
-compute-sanitizer runs: ../sanitizer/summary.txt, at f0bd6903feb5b75c52cd1857e666887a14ee9db7.
+compute-sanitizer runs at the same commit: ../sanitizer/summary.txt.
 The GPU dialect, PTX and kernel manifests of 300 program specializations are byte for byte the
 same at 3afdb08 (the CTAEmitter refactor) as before it.
