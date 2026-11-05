@@ -8,7 +8,11 @@ block and multi-block workers, and a fitted cost model decides per call
 whether that binning beats plain block per segment.
 
 Scope: one RTX 4090 (sm_89), MLIR 23.1.3, CUDA 13.2; f32 and bf16;
-synthetic segment lengths, three seeds each.
+synthetic segment lengths, three seeds each. The GPU tests, both held-out
+sets and the 19 benchmark workloads also ran on one NVIDIA A10-24Q vGPU
+(sm_86) on a Snowflake trial compute pool, driver 570 with the CUDA 13.2
+forward-compatibility driver, from programs compiled ahead of time
+([results/a10](results/a10/README.md)).
 
 | Measure (warm L2 unless noted) | ragged | Baseline | Baseline value |
 |---|---:|---|---:|
@@ -25,18 +29,39 @@ before the refitted model ran. Rows 3 to 6: `results/bench/summary.json`
 ragged wins 4, ties 4 and loses 11 against the fastest of seven
 comparisons; the cost model was fitted on them, so that is in-sample.
 
+How the 4090's cost model transfers to the A10 (6 MiB of L2 against 72
+MiB), on the same 144 held-out inputs, choices replayed on the A10's runs of
+both schedules ([results/a10/transfer.txt](results/a10/transfer.txt)):
+
+| On the A10: inputs within 3% of the faster schedule, of 144 | warm | cold |
+|---|---:|---:|
+| 4090 model as shipped (its 72 MiB L2) | 120 | 113 |
+| 4090 model with the A10's L2 (what the runtime does; 126 and 123 as run) | 126 | 122 |
+| refitted on A10 runs of the same 246 training inputs | 138 | 134 |
+
+On the A10 ragged wins 3 of the 19 workloads, ties 2 and loses 14 warm, and
+wins 3, ties 3 and loses 13 cold.
+
 ## Limitations
 
 - It loses 11 of the 19 benchmark workloads warm and 15 cold. The D=1 sum
   and max are 1.1 to 2.2 times slower than the fastest comparison. Tuned
-  Triton is 1.38 times faster on the bf16 long-tail softmax.
+  Triton is 1.38 times faster on the bf16 long-tail softmax. On the A10 it
+  loses 14 warm and 13 cold, the uniform D=128 sum, max and softmax among
+  them.
 - The cost model sees N, B, D and the longest segment, not the length
   distribution. On the held-out set it is more than 3% slower than the
   faster schedule for 32 of 144 inputs warm (40 cold), by 34 to 37% on the
   D=2 bimodal sum and max.
 - The schedule choice needs the longest segment (`max_len`) from the
   caller; without it the program always classifies.
-- One shared GPU with unlocked clocks; sm_89 only; forward only.
+- On the A10 the shipped model, with the A10's L2, is more than 3% slower
+  than the faster schedule for 18 of 144 held-out inputs warm (22 cold), by
+  up to 18% (the D=1 softmax with 200,000 segments, which the refit misses
+  too). The 4090 model's fixed costs are half the A10's.
+- Targets sm_86 and sm_89 only. One shared RTX 4090 with unlocked clocks,
+  and one A10 vGPU without compute-sanitizer, CUPTI or clock locking;
+  forward only.
 
 More: [how it works](#how-it-works) · [design trade-offs](docs/design-tradeoffs.md) ·
 [results](#results) · [all benchmark tables](results/bench/README.md) · [result files](results/README.md) ·
@@ -154,10 +179,14 @@ CUDA 13.2) ([results/tests/summary.txt](results/tests/summary.txt),
 |---|---|
 | GPU tests (`test/gpu`): every op, dtype, D in {1, 2, 6, 7, 12, 16, 24, 40, 128, 1024}, i32/i64 offsets, five length distributions, empty segments, masks, in-place, checked offsets, streams, CUDA graph capture, Driver API faults; both schedules of the adaptive program and its choice; vector access compared bitwise against one feature per thread, row pipelining and concurrent classes against the rolled, serial schedule; misaligned tensors rejected; online and three-pass softmax in every class, including 65,536-row segments; class queues read back for counts, membership and per-warp order; the Triton, CUDA, CUB, cuSPARSE and FBGEMM comparisons | 2,330 passed; 30 strict xfails where FBGEMM's `jagged_softmax` returns NaN |
 | compute-sanitizer memcheck, racecheck, initcheck and synccheck on the classified, mask, checked-offsets, scheduling, selection and per-class softmax suites (671 tests, one process per suite and tool) | 0 errors, 0 hazards |
-| lit/FileCheck tests of the dialect, passes and lowering (`test/`) | 41 passed |
-| host tests (`test/python`): cache, manifest validation, runtime contracts and stream schedule, cost model and schedule choice, benchmark harness, suite and summary | 1,190 passed; CI runs them on a CPU runner ([workflow](.github/workflows/host-tests.yml)), where the 118 that need the compiler or the CUDA library skip |
+| lit/FileCheck tests of the dialect, passes and lowering (`test/`) | 45 passed |
+| the GPU tests on one A10-24Q vGPU (sm_86), every program compiled ahead of time and no compiler on the machine ([results/a10](results/a10/README.md)) | 2,324 passed; 6 skipped (the Driver fault probes need `ptxas` and an sm_89 device); the same 30 strict xfails. No compute-sanitizer: GPU debugging is disabled on the vGPU |
+| host tests (`test/python`): cache, manifest validation, runtime contracts and stream schedule, cost model and schedule choice, benchmark harness, suite and summary | 1,213 passed; CI runs them on a CPU runner ([workflow](.github/workflows/host-tests.yml)), where the 119 that need the compiler or the CUDA library skip |
 
-All four ran at the same commit, after the cost-model refit.
+The 4090 GPU, lit and host tests ran at `0e4f674`, which adds the sm_86
+target and leaves the sm_89 GPU dialect, PTX and manifests of 530 programs
+byte for byte unchanged; the compute-sanitizer runs are from `0c4be17`,
+before it.
 
 ### The cost model on held-out shapes
 
@@ -187,6 +216,13 @@ max it runs block per segment, 34 to 37% slower than classification. On the
 D=1 softmax with 200,000 segments it classifies, 8 to 10% slower. The
 per-shape tables are in
 [results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes).
+
+On the A10 vGPU the same model, given the A10's 6 MiB L2 by the runtime,
+was within 3% for 126 of the 144 inputs warm and 123 cold as run; replayed
+with the 4090's 72 MiB it would have been 120 and 113, and refitted on A10
+runs of its 246 training inputs 138 and 134. The protocol was committed
+before the A10 runs (`bench/suite.py`, `TRANSFER_FIT_GROUPS`); the per-input
+table is [results/a10/transfer.txt](results/a10/transfer.txt).
 
 ### Speed on the 19 benchmark workloads (in-sample)
 
@@ -395,9 +431,34 @@ python -m bench.calibrate evaluate build/runs --group heldout2 --model results/b
 python -m bench.chart build/summary.json --group compare --output build/speedup.svg
 ```
 
+The default target is sm_89. For sm_86 (an A10 or an RTX 30-series GPU),
+give `ProgramSpec` `chip="sm_86"`, `bench.run` and `bench.suite`
+`--chip sm_86`, and the GPU tests `RAGGED_TEST_CHIP=sm_86`; an sm_86 program
+also runs on sm_89. A GPU machine without the MLIR toolchain runs programs
+compiled elsewhere: `bench.precompile` compiles a suite's programs into a
+cache and writes `toolchain.json`, the compiler identity that
+`Compiler(toolchain_record=...)` keys the cache with instead of running the
+compiler. How the A10 runs used it, and the cost model's transfer test:
+
+```sh
+python -m bench.precompile --chip sm_86 --groups heldout heldout2 compare --cache build/sm86-cache
+python -m bench.suite --groups heldout2 --repetitions 3 --output build/a10-runs --chip sm_86 \
+  --toolchain-record build/sm86-cache/toolchain.json --cache build/sm86-cache
+RAGGED_TEST_CHIP=sm_86 RAGGED_TOOLCHAIN_RECORD=build/sm86-cache/toolchain.json \
+  RAGGED_TEST_CACHE=build/sm86-cache PYTHONPATH=python:. python -m pytest test/gpu
+python -m bench.calibrate transfer results/a10/runs --output build/cost_model-a10.json
+```
+
+The cache for the GPU tests is filled by one run of them with the compiler
+and the same `RAGGED_TEST_CHIP` and `RAGGED_TEST_CACHE`.
+
 ## Limitations in detail
 
-- sm_89 only; one device per program; forward only (no autograd).
+- Two targets, sm_86 and sm_89 (an sm_86 program also runs on sm_89),
+  tested on an RTX 4090 and on one A10-24Q vGPU; one device per program;
+  forward only (no autograd). On the vGPU there is no compute-sanitizer,
+  CUPTI or clock locking, and its benchmarks ran once, in four jobs on a
+  trial compute pool.
 - Validated mode trusts the offsets; checked mode validates them on the device
   at the cost of a stream synchronization before the main kernels.
 - The schedule choice needs the longest segment length from the caller
@@ -406,15 +467,20 @@ python -m bench.chart build/summary.json --group compare --output build/speedup.
   column). Computing the statistics on the device would need a readback and a
   synchronization per call. A wrong `max_len` costs time, not correctness.
 - The cost model is linear in six terms and calibrated on warm times of 82
-  workloads in nine shapes (three length distributions) on one GPU, with the
-  RTX 4090's 72 MiB L2 as a constant. It sees N, B, D and the longest
+  workloads in nine shapes (three length distributions) on the RTX 4090; its
+  L2 term uses the L2 size of the device each call runs on. It sees N, B, D and the longest
   segment, not the distribution of lengths: it classifies the bursty D=128
   sum and max, 8% slower there than block per segment. On the second held-out
   set it picks the slower schedule by more than 3% for 32 of 144 inputs
   warm (40 cold), by 34 to 37% on the D=2 bimodal sum and max
   ([results/bench/README.md](results/bench/README.md#the-cost-model-on-held-out-shapes)).
   With a cold L2 it classifies the uniform D=128 inputs where block per
-  segment is 5% faster. Other GPUs are untested.
+  segment is 5% faster. On the A10 vGPU it is within 3% for 126 of the 144
+  warm (122 cold); the misses are the D=48 sum and max, classified 7 to 12%
+  slower, the D=1 softmax with 200,000 segments (up to 18%) and some D=2
+  inputs (3 to 8%). Refitted on A10 runs it is within 3% for 138 and 134, so
+  a new GPU needs its own calibration runs for the last few percent
+  ([results/a10](results/a10/README.md#the-cost-model-on-the-a10)).
 - Segment-class bounds (32 and 4,096 rows) and the 8-way split are fixed in the
   compiler and the classified ABI, not tuned per GPU or per D.
 - Vector access makes the bf16 long-tail softmax slower (302 against 264 µs
@@ -446,9 +512,11 @@ python -m bench.chart build/summary.json --group compare --output build/speedup.
   than per-segment atomics, and submitting the split chain before the CTA
   chain made the uniform D=128 sum take 176 µs instead of 133
   ([docs/design-tradeoffs.md](docs/design-tradeoffs.md)).
-- One GPU (an RTX 4090 that also drives a desktop and is shared with other
-  projects), unlocked clocks, and a host running other work; synthetic length
-  distributions plus three seeds. The Triton reference is tuned on each
+- One RTX 4090 that also drives a desktop and is shared with other
+  projects, unlocked clocks, and a host running other work; synthetic length
+  distributions plus three seeds. The A10 runs are one vGPU on a trial
+  compute pool, measured once, with the SM clock at 1,695 MHz and no
+  temperature or power readings. The Triton reference is tuned on each
   benchmark input; `torch_scatter` is not measured.
 
 ## Layout
@@ -463,7 +531,7 @@ python -m bench.chart build/summary.json --group compare --output build/speedup.
 | `runtime/` | CUDA Driver API module loader and launcher (nanobind) |
 | `oracle/` | float64 reference and test-case minimizer |
 | `baselines/`, `bench/` | comparison implementations and the benchmark harness |
-| `scripts/` | `bootstrap_llvm.sh` (LLVM/MLIR source build) and `build_baselines.py` (the CUDA/CUB comparison library) |
+| `scripts/` | `bootstrap_llvm.sh` (LLVM/MLIR source build), `build_baselines.py` (the CUDA/CUB comparison library) and `compare_compilers.py` (whether two compiler builds emit the same sm_89 code) |
 | `test/` | lit tests (`IR`, `Transforms`, `Conversion`), host tests, GPU tests |
 | `docs/` | semantics, ABIs, optimizations, error model, design trade-offs |
-| `results/` | benchmark runs and summary, cost-model calibration and evaluation, traces, test and sanitizer summaries |
+| `results/` | benchmark runs and summary, cost-model calibration and evaluation, traces, test and sanitizer summaries; `results/a10/` the same for the A10 vGPU |

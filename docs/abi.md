@@ -117,4 +117,4 @@ unloaded the same way, before interpreter teardown.
 
 The compiler's source/IR tests and the T0 compilation matrix establish the
 parameter structure only after their recorded runs pass. Real pointer,
-stream-ordering and in-flight lifetime tests still need an sm_89 device.
+stream-ordering and in-flight lifetime tests still need an sm_86 or sm_89 device.

@@ -5,6 +5,7 @@
 | LLVM/MLIR | 23.1.3, official Linux X64 SDK (a source build with assertions also works) | the compiler and lit tests |
 | CUDA Toolkit | 13.2 (nvcc/ptxas 13.2.86) | `ptxas`, the CUDA/CUB comparison library |
 | CUDA driver | 595.99 on an RTX 4090 (sm_89) | all GPU tests and benchmarks |
+| CUDA driver | 570.211.01 with the CUDA 13.2 forward-compatibility driver (libcuda 595.112.07) on one NVIDIA A10-24Q vGPU (sm_86), a Snowflake trial compute pool | the GPU tests and the A10 runs in `results/a10`, with programs compiled ahead of time on the build machine |
 | Python | 3.12 with nanobind 3.1 | runtime extension, host tests |
 | PyTorch | 2.14.1+cu132 | GPU tests, benchmarks, custom-op registration; the CPU build runs the host tests |
 | Triton | 3.8.0, using the toolkit's ptxas and libdevice | the Triton comparison kernel |

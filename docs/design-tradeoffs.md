@@ -161,15 +161,31 @@ distribution of lengths, so bursty and long-tail lengths of the same shape
 look alike: refitted, it classifies every seed of the bursty D=128 sum and
 max, 8% slower there than block per segment (181 against 168 µs), and those
 two benchmark workloads went from ties to losses against the fastest
-comparison. It is calibrated on warm times on one GPU, with that GPU's L2
-size as a constant: with a cold L2 it classifies the uniform D=128 sum, max
-and softmax, where block per segment is 5% faster. A margin against
+comparison. It is calibrated on warm times on one GPU: with a cold L2 it
+classifies the uniform D=128 sum, max and softmax, where block per segment
+is 5% faster. A margin against
 classification would move cold choices the right way but costs more warm:
 over the left-out shapes the mean excess over the faster schedule is 2.66%
 warm and 2.06% cold at no margin, and 3.21% and 1.84% at 2%, the best cold
 (`fit.txt`). Without `max_len` the program pays classification's cost
 everywhere. A wrong `max_len` costs time, never correctness, because both
 schedules are exact against the oracle.
+
+**On a second GPU.** The sixth term counts the bytes beyond the L2 of the
+device a call runs on (the runtime reads its size once per device); the
+model stores the 4090's 72 MiB only as what it was fitted with. On one
+A10-24Q vGPU (sm_86, 72 multiprocessors, 6 MiB of L2) the same 144 inputs of
+the second held-out set were measured, under a protocol committed before the
+runs (`bench/suite.py`, `TRANSFER_FIT_GROUPS`; `results/a10/transfer.txt`).
+Replayed on those runs, the shipped model with the 4090's L2 is within 3% of
+the faster schedule for 120 inputs warm and 113 cold; with the A10's L2,
+126 and 122 (126 and 123 as run). The L2 swap fixes the D=2 bimodal sum and
+max and the D=16 softmax but classifies the D=48 sum and max, 7 to 12%
+slower than block per segment (every one of these inputs exceeds a 6 MiB
+L2). Refitted on A10 runs of the 246 training inputs, the model is within 3%
+for 138 and 134. Its fixed costs are twice the 4090's (74 and 46 µs for a
+classified and a block-per-segment sum or max, against 36 and 21). The D=1 softmax
+with 200,000 segments stays a miss on both GPUs and in both fits.
 
 ## Persistent workers with a static stride
 
