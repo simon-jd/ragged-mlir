@@ -68,7 +68,7 @@ struct PlanPass : PassWrapper<PlanPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PlanPass)
   StringRef getArgument() const final { return "ragged-plan"; }
   StringRef getDescription() const final {
-    return "Select segment length classes and feature tiles within sm_89 budgets";
+    return "Select segment length classes and feature tiles within the target chip's budgets";
   }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<RaggedDialect>();
@@ -87,11 +87,14 @@ struct PlanPass : PassWrapper<PlanPass, OperationPass<ModuleOp>> {
     });
     for (MapSegmentsOp map : maps) {
       OpBuilder b(map);
-      auto chip = stringAttr(map, "chip", "sm_89");
-      if (chip != "sm_89") {
-        map.emitOpError("target must be sm_89");
+      auto chip = stringAttr(map, "chip", kDefaultChip);
+      const ChipLimits *limits = lookupChip(chip);
+      if (!limits) {
+        map.emitOpError("target must be sm_86 or sm_89");
         signalPassFailure(); return;
       }
+      // A budget above the chip's limit plans as the limit.
+      int64_t sharedBudget = std::min(intAttr(map, "smem_per_cta", limits->sharedPerCta), limits->sharedPerCta);
       int64_t d = cast<MemRefType>(map.getValues().getType()).getDimSize(1);
       // Each thread owns `vec` adjacent features, read and written with one
       // access of at most 16 bytes; vec divides D so no vector straddles the
@@ -101,7 +104,7 @@ struct PlanPass : PassWrapper<PlanPass, OperationPass<ModuleOp>> {
       if (boolAttr(map, "vectorize", true) && !map->hasAttr("feature_tile"))
         // The block tree keeps one f32 per thread and feature in shared memory.
         while (2 * vec * elementBytes <= 16 && d % (2 * vec) == 0 &&
-               128 * 2 * vec * 4 <= intAttr(map, "smem_per_cta", 49152)) vec *= 2;
+               128 * 2 * vec * 4 <= sharedBudget) vec *= 2;
       // A power-of-two feature tile keeps reduction groups aligned at warp
       // boundaries. A tile spans the next power of two of D, at most 32
       // features, with or without vectors: d_tile = features / vec threads
@@ -181,6 +184,9 @@ struct FusePass : PassWrapper<FusePass, OperationPass<ModuleOp>> {
       }
       bool alias = stringAttr(map, "alias", "none") == "inplace" || map.getValues() == map.getOut();
       auto classes = dispatch->getAttrOfType<ArrayAttr>("classes");
+      // ragged-plan accepted the dispatch's chip.
+      int64_t sharedLimit = lookupChip(stringAttr(dispatch, "chip", kDefaultChip))->sharedPerCta;
+      int64_t sharedBudget = std::min(intAttr(map, "smem_per_cta", sharedLimit), sharedLimit);
       bool onlineEnabled = boolAttr(map, "online_fusion", true);
       // Each class gets its own schedule. Online statistics are exact for
       // any segment length (compensated lane sums against a reference that
@@ -200,7 +206,7 @@ struct FusePass : PassWrapper<FusePass, OperationPass<ModuleOp>> {
         StringRef reason;
         if (!onlineEnabled) reason = "online statistics fusion disabled";
         else if (alias) reason = "in-place output requires kernel-separated read and write phases";
-        else if (classBytes > intAttr(map, "smem_per_cta", 49152)) reason = "online statistics exceed shared-memory budget";
+        else if (classBytes > sharedBudget) reason = "online statistics exceed shared-memory budget";
         bool fused = reason.empty();
         if (fused) {
           reason = "disjoint output permits online statistics";

@@ -1,6 +1,6 @@
 """Independent device tests for classified/persistent and split mappings.
 
-These tests execute generated cubins on sm_89. A missing GPU is an explicit
+These tests execute generated cubins on sm_86 or sm_89. A missing GPU is an explicit
 skip; compile failures on a present GPU must fail. Classification and split
 paths use the same float64 oracle and fixed bounds as the naive path.
 """

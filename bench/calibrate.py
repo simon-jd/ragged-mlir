@@ -22,7 +22,12 @@ program) and reports, per workload and seed, both schedules, the one the
 model chooses, the adaptive call as measured (it ran the model installed
 when the runs were made) and both against the faster schedule measured in
 the same runs. `--model` replays another model's choices (version 1 models
-included) on the same runs.
+included) on the same runs; `--l2-mib` replays them with another L2 capacity
+in place of the one the model was fitted with (another GPU's).
+
+The L2 capacity of the bytes-beyond-L2 term is the one the runs' GPU reported
+(results.json, cuda_driver.l2_cache_size_bytes): each training input uses its
+own, and a fitted model stores it, so the training runs must agree on it.
 """
 from __future__ import annotations
 
@@ -43,7 +48,6 @@ from ragged.selection import FAMILIES, SCHEDULES, TERMS, CostModel, family, feat
 METHOD = {"classified": "ragged-classified", "naive": "ragged-naive"}
 NOISE_TIE = 0.03   # what the results call a tie
 MARGINS = [percent / 100 for percent in range(11)]
-L2_MIB = 72.0      # RTX 4090: 72 MiB of L2, the GPU every committed run measured
 
 
 def collect(runs: Path, l2: str = "warm", group: str = "main") -> dict:
@@ -52,8 +56,13 @@ def collect(runs: Path, l2: str = "warm", group: str = "main") -> dict:
     for path in sorted((runs / group).glob("*/seed-*/rep-*/results.json")):
         report = json.loads(path.read_text())
         name, seed = path.parts[-4], int(path.parts[-3].removeprefix("seed-"))
+        l2_bytes = (report.get("cuda_driver") or {}).get("l2_cache_size_bytes")
+        if not isinstance(l2_bytes, int) or l2_bytes <= 0:
+            raise SystemExit(f"{path}: the run does not record its GPU's L2 size")
         entry = found.setdefault((name, seed), {"case": report["case"], "methods": defaultdict(list),
-                                                "selected": []})
+                                                "selected": [], "l2_mib": l2_bytes / 2**20})
+        if entry["l2_mib"] != l2_bytes / 2**20:
+            raise SystemExit(f"{path}: repetitions of one input ran on GPUs with different L2 sizes")
         for cell in report["methods"]:
             if cell.get("status") != "measured":
                 continue
@@ -103,23 +112,35 @@ def fit(inputs: list[tuple[tuple, dict]]) -> dict:
         chosen = [entry for _, entry in inputs if family(entry["case"]["op"]) == name]
         if len(chosen) < TERMS:
             raise SystemExit(f"{name}: {len(chosen)} training inputs, need at least {TERMS}")
-        x = np.array([features(*shape(entry["case"]), op=entry["case"]["op"], l2_mib=L2_MIB) for entry in chosen])
+        x = np.array([features(*shape(entry["case"]), op=entry["case"]["op"], l2_mib=entry["l2_mib"])
+                      for entry in chosen])
         for schedule in SCHEDULES:
             t = np.array([measured(entry)[schedule] for entry in chosen])
             coefficients[name][schedule] = [round(float(c), 6) for c in nnls(x / t[:, None], np.ones(len(t)))]
     return coefficients
 
 
-def model_data(coefficients: dict, margin: float, calibration: dict) -> dict:
-    return {"version": 2, "coefficients": coefficients, "margin": margin, "l2_mib": L2_MIB,
+def model_data(coefficients: dict, margin: float, calibration: dict, l2_mib: float) -> dict:
+    return {"version": 2, "coefficients": coefficients, "margin": margin, "l2_mib": l2_mib,
             "calibration": calibration}
 
 
-def excess(model: CostModel, inputs: list[tuple[tuple, dict]]) -> list[float]:
-    """Per input, how much slower the model's choice measured than the faster schedule."""
+def l2_of(inputs: list[tuple[tuple, dict]]) -> float:
+    """The L2 capacity (MiB) the training runs' GPU reported; they must agree."""
+    sizes = {entry["l2_mib"] for _, entry in inputs}
+    if len(sizes) != 1:
+        raise SystemExit(f"training runs come from GPUs with different L2 sizes: {sorted(sizes)} MiB")
+    return sizes.pop()
+
+
+def excess(model: CostModel, inputs: list[tuple[tuple, dict]], device_l2: bool = True) -> list[float]:
+    """Per input, how much slower the model's choice measured than the faster
+    schedule; with the L2 capacity of the runs' GPU, or (``device_l2`` False)
+    the one the model was fitted with."""
     out = []
     for _, entry in inputs:
-        chosen, _ = model.choose(entry["case"]["op"], *shape(entry["case"]))
+        chosen, _ = model.choose(entry["case"]["op"], *shape(entry["case"]),
+                                 l2_mib=entry["l2_mib"] if device_l2 else None)
         times = measured(entry)
         out.append(times[chosen] / min(times.values()) - 1)
     return out
@@ -141,7 +162,7 @@ def cross_validate(inputs: list[tuple[tuple, dict]], cold: dict | None = None) -
         test = [item for item in inputs if shape(item[1]["case"])[:3] == left_out]
         coefficients = fit(train)
         for margin in MARGINS:
-            model = CostModel.from_dict(model_data(coefficients, margin, {}))
+            model = CostModel.from_dict(model_data(coefficients, margin, {}, l2_of(inputs)))
             result[margin]["warm"] += excess(model, test)
             if cold is not None:
                 result[margin]["cold"] += excess(model, [(key, cold[key]) for key, _ in test if key in cold])
@@ -158,22 +179,9 @@ def margin_by_shape(inputs: list[tuple[tuple, dict]], cold: dict | None = None):
 
 
 def run_fit(args: argparse.Namespace) -> None:
-    found = {(group, *key): entry for group in args.groups
-             for key, entry in collect(args.runs, "warm", group).items()}
-    inputs = points(found, args.train)
-    cold = dict(points({(group, *key): entry for group in args.groups
-                        for key, entry in collect(args.runs, "cold", group).items()}, args.train))
-    coefficients = fit(inputs)
-    margin, scores, result = margin_by_shape(inputs, cold)
+    data, inputs, cv, margin = fit_groups(args.runs, args.groups, args.train)
+    coefficients, scores, result = data["coefficients"], cv["scores"], cv["result"]
     shapes = sorted({shape(entry["case"])[:3] for _, entry in inputs})
-    data = model_data(coefficients, margin, {
-        "runs": str(args.runs), "groups": args.groups, "train_seeds": args.train, "l2": "warm",
-        "statistic": "median over processes of each process's median complete-call time",
-        "terms": "t_us = c0 + c1*M + c2*S + c3*B/1000 + c4*M*log2(skew) + c5*X, M = N*D/2^18, "
-                 "S = L*d_tile*d_vector/128/1000, skew = L*B/N, X = MiB of input rows plus output "
-                 "(B rows, N for softmax) beyond l2_mib",
-        "margin": "leave-one-shape-out cross-validation over 0..10%",
-        "inputs": len(inputs), "shapes": len(shapes)})
     args.output.write_text(json.dumps(data, indent=2) + "\n")
     model = CostModel.from_dict(data)
     print(f"{len(inputs)} inputs in {len(shapes)} (N, B, D) shapes; coefficients {json.dumps(coefficients)}")
@@ -187,18 +195,39 @@ def run_fit(args: argparse.Namespace) -> None:
     print(f"within 3% of the faster schedule on the training inputs: {within(model, inputs)} of {len(inputs)}")
     print(f"{'group':8} {'case':32} {'seed':>4} {'classified':>10} {'pred':>7} {'naive':>8} {'pred':>7}  chosen")
     for (group, name, seed), entry in inputs:
-        chosen, info = model.choose(entry["case"]["op"], *shape(entry["case"]))
+        chosen, info = model.choose(entry["case"]["op"], *shape(entry["case"]), l2_mib=entry["l2_mib"])
         predicted, times = info["predicted_us"], measured(entry)
         print(f"{group:8} {name:32} {seed:>4} {times['classified']:10.1f} {predicted['classified']:7.1f} "
               f"{times['naive']:8.1f} {predicted['naive']:7.1f}  {chosen}")
+
+
+def fit_groups(runs: Path, groups: list[str], seeds: list[int]) -> tuple[dict, list, dict, float]:
+    """Fit on the groups' runs: (model data, training inputs, cross-validation result, margin)."""
+    found = {(group, *key): entry for group in groups for key, entry in collect(runs, "warm", group).items()}
+    inputs = points(found, seeds)
+    cold = dict(points({(group, *key): entry for group in groups
+                        for key, entry in collect(runs, "cold", group).items()}, seeds))
+    coefficients = fit(inputs)
+    margin, scores, result = margin_by_shape(inputs, cold)
+    shapes = sorted({shape(entry["case"])[:3] for _, entry in inputs})
+    data = model_data(coefficients, margin, {
+        "runs": str(runs), "groups": list(groups), "train_seeds": seeds, "l2": "warm",
+        "statistic": "median over processes of each process's median complete-call time",
+        "terms": "t_us = c0 + c1*M + c2*S + c3*B/1000 + c4*M*log2(skew) + c5*X, M = N*D/2^18, "
+                 "S = L*d_tile*d_vector/128/1000, skew = L*B/N, X = MiB of input rows plus output "
+                 "(B rows, N for softmax) beyond l2_mib",
+        "margin": "leave-one-shape-out cross-validation over 0..10%",
+        "inputs": len(inputs), "shapes": len(shapes)}, l2_of(inputs))
+    return data, inputs, {"scores": scores, "result": result}, margin
 
 
 def run_evaluate(args: argparse.Namespace) -> None:
     model = CostModel.load(args.model)
     for l2 in ("warm", "cold"):
         found = collect(args.runs, l2, args.group)
+        l2_mib = model.l2_mib if args.l2_mib is None else args.l2_mib
         print(f"{l2} L2, {args.group} runs, seeds {' '.join(map(str, args.seeds))}, model {args.model} "
-              f"(version {model.version}): median complete-call us over repetitions")
+              f"(version {model.version}, L2 {l2_mib:g} MiB): median complete-call us over repetitions")
         print(f"{'case':34} {'seed':>4} {'classified':>10} {'naive':>8} {'chooses':>10} {'vs best':>8} "
               f"{'adaptive ran':>12} {'adaptive':>9} {'vs best':>8}")
         outcomes, adaptive = defaultdict(int), defaultdict(int)
@@ -206,7 +235,7 @@ def run_evaluate(args: argparse.Namespace) -> None:
             if seed not in args.seeds or not all(entry["methods"].get(METHOD[s]) for s in SCHEDULES):
                 continue
             case = entry["case"]
-            chosen, _ = model.choose(case["op"], *shape(case))
+            chosen, _ = model.choose(case["op"], *shape(case), l2_mib=args.l2_mib)
             times = measured(entry)
             best = min(times.values())
             regret = times[chosen] / best - 1
@@ -242,6 +271,8 @@ def main() -> None:
     evaluator.add_argument("--seeds", type=int, nargs="+", default=[711, 712, 713])
     evaluator.add_argument("--model", type=Path, default=Path("python/ragged/cost_model.json"))
     evaluator.add_argument("--group", default="heldout2", help="suite group to evaluate")
+    evaluator.add_argument("--l2-mib", type=float,
+                           help="replay the model with this L2 capacity instead of the one it was fitted with")
     evaluator.set_defaults(handler=run_evaluate)
     args = parser.parse_args()
     args.handler(args)

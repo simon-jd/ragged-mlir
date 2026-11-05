@@ -14,7 +14,7 @@ from typing import Any
 from .cache import Artifact
 from .errors import CacheMismatch, RuntimeUnavailable, ValidationError
 from .layout import I64_MAX, resolve_layout
-from .model import ExecutionReport, ProgramSpec, canonical_json
+from .model import ExecutionReport, ProgramSpec, canonical_json, runs_on
 from .optimizations import computation_metadata
 from .resources import resource_report
 from .selection import default_model
@@ -32,7 +32,8 @@ _resident_modules: dict[tuple[int, str], Any] = {}
 _holders: Counter = Counter()                       # live programs per module
 _streams: dict[tuple[int, str], dict[int, Any]] = {}  # streams each module launched on
 _retiring: list[tuple[Any, list[Any]]] = []         # (module, events) awaiting completion
-_sm89_devices: set[int] = set()                     # device ordinals already checked
+_checked_devices: set[tuple[int, str]] = set()      # (device ordinal, chip) already checked
+_device_l2_mib: dict[int, float | None] = {}         # L2 capacity per device ordinal, MiB
 # Device-sized worker counts per module: for each kernel whose grid x is
 # min_B_resident, how many of its (y, z) block groups the device holds at once.
 _workers: dict[tuple[int, str], dict[str, int]] = {}
@@ -161,6 +162,22 @@ def _scratch_layout(layouts: Any) -> tuple[list[int], list[int], list[int], int]
     return descriptors, relocations, offsets, end
 
 
+def device_l2_mib(values) -> float | None:
+    """The L2 capacity in MiB of the CUDA device holding ``values``, queried
+    once per device; None when the tensor or PyTorch does not report one."""
+    device = getattr(values, "device", None)
+    if getattr(device, "type", None) != "cuda":
+        return None
+    index = device.index if device.index is not None else 0
+    if index not in _device_l2_mib:
+        try:
+            l2 = _torch().cuda.get_device_properties(index).L2_cache_size
+        except (AttributeError, RuntimeError, AssertionError):
+            l2 = 0
+        _device_l2_mib[index] = l2 / 2**20 if isinstance(l2, int) and l2 > 0 else None
+    return _device_l2_mib[index]
+
+
 def _torch():
     try:
         return importlib.import_module("torch")
@@ -232,11 +249,14 @@ class CompiledProgram:
         per segment is an alternative schedule worth choosing per call."""
         return self._selects
 
-    def choose(self, n: int, b: int, max_len: int | None) -> tuple[str, dict[str, Any]]:
-        """The schedule run(select="auto") uses for this input and why."""
+    def choose(self, n: int, b: int, max_len: int | None,
+               l2_mib: float | None = None) -> tuple[str, dict[str, Any]]:
+        """The schedule run(select="auto") uses for this input and why; with
+        ``l2_mib`` (run passes the device's L2), the cost model counts the
+        working set beyond that L2 instead of the one it was fitted on."""
         if self.naive is None:
             return ("classified" if self.selects else self.spec.strategy), {}
-        key = (n, b, max_len)
+        key = (n, b, max_len, l2_mib)
         choice = self._choices.get(key)
         if choice is None:
             if len(self._choices) >= 256:
@@ -244,7 +264,7 @@ class CompiledProgram:
             span = self._metadata.get("d_tile", 32) * self._metadata.get("d_vector", 1)
             element = 2 if self.spec.dtype == "bf16" else 4
             choice = self._choices[key] = default_model().choose(self.spec.op, n, b, self.spec.feature_dim,
-                                                                 max_len, span, element)
+                                                                 max_len, span, element, l2_mib=l2_mib)
         return choice
 
     def _layout(self, metadata: dict[str, Any], validation: bool, n: int, b: int,
@@ -291,7 +311,8 @@ class CompiledProgram:
             if not isinstance(tensor, torch.Tensor):
                 raise ValidationError(f"{name} must be a torch.Tensor")
             if not tensor.is_cuda:
-                raise RuntimeUnavailable(f"{name} must be on an sm_89 CUDA device; no CPU execution fallback exists")
+                raise RuntimeUnavailable(f"{name} must be on a CUDA device that runs {self.spec.chip} cubins; "
+                                         "no CPU execution fallback exists")
             if not tensor.is_contiguous():
                 raise ValidationError(f"{name} must be row-major contiguous")
             if tensor.requires_grad:
@@ -410,7 +431,8 @@ class CompiledProgram:
                     n, b = int(values.shape[0]), int(offsets.numel()) - 1
                 except (AttributeError, IndexError, TypeError):
                     n = b = None   # the classified path's validation reports it
-                chosen, selection = self.choose(n, b, max_len) if n is not None else ("classified", {})
+                chosen, selection = (self.choose(n, b, max_len, device_l2_mib(values)) if n is not None
+                                     else ("classified", {}))
             if chosen == "naive":
                 return self.naive._run(values, offsets, out, stream, mode, debug_buffers=debug_buffers,
                                        mask=mask, concurrent=concurrent, selected="naive", selection=selection)
@@ -443,10 +465,12 @@ class CompiledProgram:
                                    **self._report_fields)
         launched_names, launched_grids = [], []
         with torch.cuda.device(values.device):
-            if values.device.index not in _sm89_devices:
-                if tuple(torch.cuda.get_device_capability(values.device)) != (8, 9):
-                    raise RuntimeUnavailable("compiled target sm_89 does not match the current device")
-                _sm89_devices.add(values.device.index)
+            if (values.device.index, self.spec.chip) not in _checked_devices:
+                capability = tuple(torch.cuda.get_device_capability(values.device))
+                if not runs_on(self.spec.chip, capability):
+                    raise RuntimeUnavailable(f"compiled target {self.spec.chip} does not run on the current device "
+                                             f"(sm_{capability[0]}{capability[1]})")
+                _checked_devices.add((values.device.index, self.spec.chip))
             active_stream = stream if stream is not None else torch.cuda.current_stream(values.device)
             if not isinstance(active_stream, torch.cuda.Stream) or active_stream.device != values.device:
                 raise ValidationError("stream must be a torch.cuda.Stream on the values device")
@@ -462,7 +486,7 @@ class CompiledProgram:
                         native = importlib.import_module("ragged._native")
                     except ImportError as exc:
                         raise RuntimeUnavailable("native Driver API extension is missing; build runtime/ with nanobind") from exc
-                    _resident_modules[module_key] = native.DriverModule(self.artifact.cubin)
+                    _resident_modules[module_key] = native.DriverModule(self.artifact.cubin, target=self.spec.chip)
                 if self._module_key != module_key:
                     if self._module_key is not None:
                         _release(self._module_key)

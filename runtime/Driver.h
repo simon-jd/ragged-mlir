@@ -20,7 +20,10 @@ struct PlanStep {
 // Arguments are the flattened, 64-bit-index MLIR memref descriptor ABI.
 class DriverModule {
 public:
-  explicit DriverModule(const std::string &cubin);
+  // target is the chip the cubin was compiled for ("sm_86" or "sm_89"). The
+  // device must have its major compute capability and at least its minor one,
+  // the CUDA rule for running a cubin on a later chip of the same major.
+  explicit DriverModule(const std::string &cubin, const std::string &target = "sm_89");
   ~DriverModule();
   DriverModule(const DriverModule &) = delete;
   DriverModule &operator=(const DriverModule &) = delete;

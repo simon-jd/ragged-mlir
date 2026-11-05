@@ -42,7 +42,7 @@ llvm::cl::opt<std::string> output("o", llvm::cl::desc("output path"), llvm::cl::
 llvm::cl::opt<std::string> emit("emit", llvm::cl::desc("legal|plan|gpu|nvvm|ptx|cubin"), llvm::cl::init("gpu"));
 llvm::cl::opt<bool> explain("explain", llvm::cl::desc("print dispatch decisions to stderr"));
 llvm::cl::opt<std::string> toolkit("cuda-toolkit", llvm::cl::desc("CUDA toolkit root for libdevice and ptxas"), llvm::cl::init(""));
-llvm::cl::opt<std::string> chip("chip", llvm::cl::desc("target chip (sm_89)"), llvm::cl::init("sm_89"));
+llvm::cl::opt<std::string> chip("chip", llvm::cl::desc("target chip (sm_86 or sm_89)"), llvm::cl::init("sm_89"));
 llvm::cl::opt<std::string> features("features", llvm::cl::desc("PTX target feature"), llvm::cl::init("+ptx80"));
 llvm::cl::opt<bool> toolchainJSON("toolchain-json", llvm::cl::desc("print actual compiler and ptxas provenance"));
 
@@ -132,6 +132,7 @@ FailureOr<llvm::json::Object> measuredResources(StringRef log, ArrayAttr main,
   };
   llvm::StringMap<Measurement> measurements;
   SmallVector<StringRef> order;
+  const int64_t threadsPerCta = ragged::lookupChip(chip)->threadsPerCta;
   auto reject = [&](const Twine &message) -> FailureOr<llvm::json::Object> {
     llvm::errs() << "ptxas resource validation failed: " << message << "\n";
     return failure();
@@ -148,7 +149,7 @@ FailureOr<llvm::json::Object> measuredResources(StringRef log, ArrayAttr main,
       auto block = kernel.getAs<DenseI64ArrayAttr>("block");
       if (!block || block.size() != 3) return reject("invalid launch block for " + name);
       for (int64_t dimension : block.asArrayRef()) {
-        if (dimension <= 0 || dimension > 1024 || item.threads > 1024 / dimension)
+        if (dimension <= 0 || dimension > threadsPerCta || item.threads > threadsPerCta / dimension)
           return reject("invalid thread count for " + name);
         item.threads *= dimension;
       }
@@ -257,7 +258,7 @@ int main(int argc, char **argv) {
   llvm::InitializeAllAsmPrinters();
   mlir::registerAllPasses();
   ragged::registerRaggedPasses();
-  llvm::cl::ParseCommandLineOptions(argc, argv, "Compile ragged operations to sm_89 GPU kernels\n");
+  llvm::cl::ParseCommandLineOptions(argc, argv, "Compile ragged operations to sm_86 or sm_89 GPU kernels\n");
 #ifdef LLVM_REVISION
   if (StringRef(LLVM_REVISION).empty()) {
     llvm::errs() << "LLVM_REVISION is empty; compiler toolchain provenance is unavailable\n";
@@ -269,10 +270,10 @@ int main(int argc, char **argv) {
     return 1;
   }
 #endif
-  if (chip != "sm_89" || !StringRef(features).starts_with("+ptx") ||
+  if (!ragged::lookupChip(chip) || !StringRef(features).starts_with("+ptx") ||
       StringRef(features).drop_front(4).empty() ||
       !llvm::all_of(StringRef(features).drop_front(4), [](char c) { return c >= '0' && c <= '9'; })) {
-    llvm::errs() << "only --chip=sm_89 and a single +ptxNN feature are supported\n"; return 1;
+    llvm::errs() << "only --chip=sm_86 or sm_89 and a single +ptxNN feature are supported\n"; return 1;
   }
   // LLVM warns and ignores unknown feature names by default. Validate against
   // the linked backend's actual feature table before a cache key or sidecar can
@@ -315,11 +316,19 @@ int main(int argc, char **argv) {
   int64_t d = 0;
   bool softmax = false;
   bool additiveMask = false;
-  int64_t regsBudget = 65536, sharedBudget = 49152;
+  const ragged::ChipLimits &limits = *ragged::lookupChip(chip);
+  int64_t regsBudget = limits.registersPerCta, sharedBudget = limits.sharedPerCta;
   unsigned opCount = 0;
+  bool chipConflict = false;
   module->walk([&](Operation *op) {
     if (isa<ragged::SegmentReduceOp, ragged::SegmentSoftmaxOp>(op)) {
       ++opCount; softmax = isa<ragged::SegmentSoftmaxOp>(op);
+      // ragged-plan reads the target from the operation (the dialect's
+      // default is sm_89); --chip makes it explicit for any other chip.
+      if (auto attr = op->getAttrOfType<StringAttr>("chip"))
+        chipConflict |= attr.getValue() != chip;
+      else if (chip != ragged::kDefaultChip)
+        op->setAttr("chip", StringAttr::get(op->getContext(), chip));
       additiveMask = op->getNumOperands() == 4;
       d = cast<MemRefType>(op->getOperand(0).getType()).getDimSize(1);
       if (auto attr = op->getAttrOfType<IntegerAttr>("regs_budget")) regsBudget = attr.getInt();
@@ -327,6 +336,7 @@ int main(int argc, char **argv) {
     }
   });
   if (opCount != 1) { llvm::errs() << "ragged-compile requires exactly one source ragged operation\n"; return 1; }
+  if (chipConflict) { llvm::errs() << "the operation's chip attribute differs from --chip=" << chip << "\n"; return 1; }
   Builder builder(&context);
   module->getOperation()->setAttr("ragged.resources", builder.getDictionaryAttr({
       builder.getNamedAttr("status", builder.getStringAttr("unmeasured")),
@@ -449,7 +459,7 @@ int main(int argc, char **argv) {
         workspace.push_back(llvm::json::Object{{"name", name.str()}, {"shape", llvm::json::Array{"B", d}}, {"dtype", "f32"}});
     }
     llvm::json::Object manifest{
-      {"schema", 1}, {"abi", "mlir-memref64-v1"}, {"chip", "sm_89"},
+      {"schema", 1}, {"abi", "mlir-memref64-v1"}, {"chip", chip.getValue()},
       {"mask", additiveMask},
       {"resources", std::move(resources)},
       {"optimizations", attrToJSON(optimizationManifest)},

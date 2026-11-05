@@ -17,7 +17,7 @@ def synthetic():
                 case = {"op": op, "elements": n, "segments": b, "D": d, "max_length": factor * n // b, "dtype": "f32"}
                 x = features(*calibrate.shape(case), op=op)
                 times = {s: sum(c * v for c, v in zip(TRUTH[s], x)) for s in TRUTH}
-                entry = {"case": case, "selected": [],
+                entry = {"case": case, "selected": [], "l2_mib": 72.0,
                          "methods": {calibrate.METHOD[s]: [times[s]] for s in TRUTH}}
                 inputs.append((("main", f"{op}-{d}-{b}-{factor}", 711), entry))
     return inputs
@@ -32,7 +32,7 @@ def test_fit_recovers_the_generating_coefficients_and_needs_no_margin():
     margin, scores, excess = calibrate.margin_by_shape(inputs, dict(inputs))
     assert margin == 0.0 and scores[0.0] == len(inputs) >= max(scores.values())
     assert excess[0.0]["warm"] == excess[0.0]["cold"] and max(excess[0.0]["warm"]) <= calibrate.NOISE_TIE
-    model = CostModel.from_dict(calibrate.model_data(coefficients, margin, {}))
+    model = CostModel.from_dict(calibrate.model_data(coefficients, margin, {}, 72.0))
     assert calibrate.within(model, inputs) == len(inputs)
 
 

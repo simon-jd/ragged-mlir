@@ -25,8 +25,8 @@ def fbgemm_environment():
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("FBGEMM device qualification pending: no CUDA device")
-    if tuple(torch.cuda.get_device_capability()) != (8, 9):
-        pytest.skip("FBGEMM comparison qualification requires sm_89")
+    if tuple(torch.cuda.get_device_capability()) not in ((8, 6), (8, 9)):
+        pytest.skip("FBGEMM comparison qualification requires sm_86 or sm_89")
     try:
         provenance = adapter.toolchain()
     except adapter.OptionalDependencyUnavailable as error:

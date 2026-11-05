@@ -28,8 +28,8 @@ def case(torch, spec, distribution, seed=3):
 @pytest.mark.parametrize("distribution", ["uniform", "long_tail", "burst"])
 def test_both_schedules_match_the_oracle_and_auto_follows_the_model(gpu_environment, op, dtype, d, distribution):
     torch, compile_spec, _, _ = gpu_environment
-    spec = ProgramSpec(op, dtype, d)
-    program = compile_spec(spec)
+    program = compile_spec(ProgramSpec(op, dtype, d))
+    spec = program.spec   # for the chip under test
     assert program.naive is not None and program.naive.spec == replace(spec, strategy="naive")
     lengths, values, offsets, device_values, device_offsets = case(torch, spec, distribution)
     for select in ("classified", "naive"):
@@ -38,11 +38,14 @@ def test_both_schedules_match_the_oracle_and_auto_follows_the_model(gpu_environm
         assert ("classify" in " ".join(report.kernel_names)) == (select == "classified")
         assert_matches(output.float().cpu().numpy(), values, offsets, operation=op, input_dtype=dtype)
     longest = int(lengths.max())
+    # The runtime counts the bytes beyond this device's L2, not the calibration GPU's.
+    l2_mib = torch.cuda.get_device_properties(device_values.device).L2_cache_size / 2**20
     expected, _ = default_model().choose(op, len(values), len(lengths), d, longest,
                                          program._metadata["d_tile"] * program._metadata["d_vector"],
-                                         2 if dtype == "bf16" else 4)
+                                         2 if dtype == "bf16" else 4, l2_mib=l2_mib)
     output, report = run(torch, program, device_values, device_offsets, max_len=longest)
     assert report.selected == expected and report.selection["max_len"] == longest
+    assert report.selection["l2_mib"] == l2_mib
     assert_matches(output.float().cpu().numpy(), values, offsets, operation=op, input_dtype=dtype)
     _, report = run(torch, program, device_values, device_offsets)
     assert report.selected == "classified"

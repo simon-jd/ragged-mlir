@@ -18,6 +18,7 @@ def main():
     parser.add_argument('--nvcc', default='/usr/local/cuda-13.2/bin/nvcc')
     parser.add_argument('--cccl', type=Path, default=Path('.deps/cccl-3.5.0'))
     parser.add_argument('--output', type=Path, default=Path('build-baselines'))
+    parser.add_argument('--arch', choices=('sm_86', 'sm_89'), default='sm_89')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     source = Path(__file__).resolve().parents[1] / 'baselines/cuda/baselines.cu'
@@ -32,11 +33,11 @@ def main():
         # benchmark records that embed it do not name the build machine.
         path = Path(path).resolve()
         return str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
-    command = [args.nvcc, '-std=c++17', '-O3', '--fmad=false', '-arch=sm_89',
+    command = [args.nvcc, '-std=c++17', '-O3', '--fmad=false', f'-arch={args.arch}',
                '--shared', '-Xcompiler=-fPIC', '-Xptxas=-v',
                *['-I' + shown(path) for path in include], shown(source), '-o', shown(library)]
     report = {'schema': 1, 'scope': 'compile only; device correctness and performance unverified',
-              'command': command, 'source_sha256': sha256(source), 'cccl_expected': '3.5.0',
+              'arch': args.arch, 'command': command, 'source_sha256': sha256(source), 'cccl_expected': '3.5.0',
               'nvcc_version': subprocess.run([args.nvcc, '--version'], capture_output=True,
                                             text=True, check=True).stdout}
     started = time.perf_counter()

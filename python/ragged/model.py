@@ -14,6 +14,38 @@ from .optimizations import BOOL_OPTIONS, Optimizations
 DIALECT_VERSION = "1"
 
 
+@dataclass(frozen=True)
+class ChipLimits:
+    """Per-CTA limits of a target chip (CUDA C++ Programming Guide, compute
+    capabilities 8.6 and 8.9): static shared memory in bytes, 32-bit registers
+    and threads. ragged-plan plans within the smaller of them and a
+    program's smem_per_cta and regs_budget (include/Ragged/Passes.h holds the
+    same table). Resident CTAs per multiprocessor and the L2 size depend on the
+    device, so the runtime queries them instead."""
+    shared_per_cta: int
+    registers_per_cta: int
+    threads_per_cta: int
+
+
+DEFAULT_CHIP = "sm_89"
+CHIPS = {"sm_86": ChipLimits(49152, 65536, 1024), "sm_89": ChipLimits(49152, 65536, 1024)}
+
+
+def chip_capability(chip: str) -> tuple[int, int]:
+    """(major, minor) compute capability of a supported chip name."""
+    if chip not in CHIPS:
+        raise ValidationError("chip must be sm_86 or sm_89")
+    return int(chip[3]), int(chip[4])
+
+
+def runs_on(chip: str, capability: tuple[int, int]) -> bool:
+    """Whether a cubin for ``chip`` runs on a device of ``capability``: the
+    same major compute capability and at least the chip's minor one (CUDA's
+    binary compatibility; an sm_86 cubin also runs on sm_89)."""
+    major, minor = chip_capability(chip)
+    return capability[0] == major and capability[1] >= minor
+
+
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
@@ -47,7 +79,7 @@ class ProgramSpec:
     hints: Hints = field(default_factory=Hints)
     strategy: str = "auto"
     alias: str = "none"
-    chip: str = "sm_89"
+    chip: str = DEFAULT_CHIP
     force_fusion: bool = False
     scale: float = 1.0
     debug_visits: bool = False
@@ -73,8 +105,8 @@ class ProgramSpec:
             raise ValidationError("alias must be none or inplace")
         if self.alias == "inplace" and self.op != "softmax":
             raise ValidationError("in-place output is only defined for softmax")
-        if self.chip != "sm_89":
-            raise ValidationError("only sm_89 is supported")
+        if self.chip not in CHIPS:
+            raise ValidationError("chip must be sm_86 or sm_89")
         if type(self.force_fusion) is not bool:
             raise ValidationError("force_fusion must be bool")
         if type(self.debug_visits) is not bool:

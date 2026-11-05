@@ -42,6 +42,9 @@ class NativeBaselines:
             if manifest.get('library_sha256') != self.provenance['library_sha256']:
                 raise ValueError('baseline library differs from its build manifest')
             self.provenance['build'] = manifest
+        # The architecture the library was compiled for (build.json; sm_89 before it recorded one).
+        arch = self.provenance.get('build', {}).get('arch', 'sm_89')
+        self.capability = (int(arch[3]), int(arch[4]))
 
     def _check(self, code):
         if code:
@@ -70,8 +73,10 @@ class NativeBaselines:
             raise ValueError('N exceeds i32 offsets range')
         bits = 32 if offsets.dtype == torch.int32 else 64
         with torch.cuda.device(values.device):
-            if tuple(torch.cuda.get_device_capability(values.device)) != (8, 9):
-                raise ValueError('native baseline compiled only for sm_89')
+            major, minor = torch.cuda.get_device_capability(values.device)
+            if major != self.capability[0] or minor < self.capability[1]:
+                raise ValueError(f'native baseline compiled for sm_{self.capability[0]}{self.capability[1]}, '
+                                 f'which does not run on sm_{major}{minor}')
             stream = torch.cuda.current_stream(values.device)
             ptr = stream.cuda_stream
             promoted = values.float()

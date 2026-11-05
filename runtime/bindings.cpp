@@ -11,9 +11,9 @@ namespace nb = nanobind;
 NB_MODULE(_native, module) {
   module.doc() = "Ragged CUDA Driver API loader (no CUDA runtime or CPU emulation)";
   nb::class_<ragged::DriverModule>(module, "DriverModule")
-      .def("__init__", [](ragged::DriverModule *self, nb::bytes cubin) {
-        new (self) ragged::DriverModule(std::string(cubin.c_str(), cubin.size()));
-      }, nb::arg("cubin"))
+      .def("__init__", [](ragged::DriverModule *self, nb::bytes cubin, const std::string &target) {
+        new (self) ragged::DriverModule(std::string(cubin.c_str(), cubin.size()), target);
+      }, nb::arg("cubin"), nb::arg("target") = "sm_89")
       .def("launch", &ragged::DriverModule::launch,
            nb::arg("kernel"), nb::arg("grid"), nb::arg("block"),
            nb::arg("shared_bytes"), nb::arg("stream"), nb::arg("arguments"))

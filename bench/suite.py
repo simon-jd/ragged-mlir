@@ -113,12 +113,20 @@ def main():
                         help="with --lock, hold it across consecutive processes for up to this many seconds")
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--compiler", default="build/bin/ragged-compile")
+    parser.add_argument("--chip", choices=("sm_86", "sm_89"), default="sm_89", help="target of the ragged programs")
+    parser.add_argument("--toolchain-record", type=Path,
+                        help="run ragged programs precompiled into --cache by bench.precompile (no compiler)")
+    parser.add_argument("--cache", type=Path, help="with --toolchain-record: the precompiled artifact cache")
     parser.add_argument("--native-library", default="build-baselines/libragged_baselines.so")
     parser.add_argument("--timeout", type=int, default=1800, help="seconds per process, not counting the lock wait")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.repetitions < 1 or not args.seeds:
         parser.error("need at least one seed and one repetition")
+    if (args.toolchain_record is None) != (args.cache is None):
+        parser.error("--toolchain-record and --cache go together")
+    precompiled = ([] if args.toolchain_record is None else
+                   ["--toolchain-record", str(args.toolchain_record), "--cache", str(args.cache)])
     triton_cache = args.output / "triton-cache"
     selected = [case for case in cases() if case[0].split("/")[0] in args.groups
                 and (args.only is None or args.only in case[1])]
@@ -137,7 +145,7 @@ def main():
         destination = args.output / group / name / f"seed-{seed}" / f"rep-{repetition}"
         command = ["timeout", str(args.timeout), args.python, "-m", "bench.run",
                    "--compiler", args.compiler, "--native-library", args.native_library,
-                   *flags, "--seed", str(seed), "--l2", args.l2, "--triton-cache", str(triton_cache),
+                   "--chip", args.chip, *precompiled, *flags, "--seed", str(seed), "--l2", args.l2, "--triton-cache", str(triton_cache),
                    "--output", str(destination)]
         if args.lock is not None and not args.lock_batch:
             command = ["flock", str(args.lock), *command]

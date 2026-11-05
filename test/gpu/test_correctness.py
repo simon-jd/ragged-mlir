@@ -1,15 +1,20 @@
-"""Real sm_89 execution against an independent NumPy float64 oracle.
+"""Real sm_86 or sm_89 execution against an independent NumPy float64 oracle.
 
 Run explicitly: pytest test/gpu/test_correctness.py -ra
-CUDA/sm_89 absence is a reported skip, never numerical evidence. With sm_89
-available, missing compiler/native modules are failures. No mocked GPU or CPU
-fallback is permitted. Device classification, split mapping and checked execution
+Programs target the current device's chip, or RAGGED_TEST_CHIP (sm_86 cubins
+also run on sm_89). With RAGGED_TOOLCHAIN_RECORD and RAGGED_TEST_CACHE they
+are loaded from a cache that bench.precompile or an earlier run with the
+compiler filled, and no compiler runs; a program missing there fails.
+A missing or unsupported CUDA device is a reported skip, never numerical
+evidence. With one available, missing compiler/native modules are failures.
+No mocked GPU or CPU fallback is permitted. Device classification, split mapping and checked execution
 have their own suites (test_classified.py, test_checked.py); sanitizer runs are
 separate (results/sanitizer).
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 import gc
 import importlib
 import os
@@ -21,6 +26,7 @@ import pytest
 from bench.distributions import DISTRIBUTIONS, make_lengths, offsets_from_lengths
 from oracle import assert_matches, quantize_bf16
 from ragged import ArtifactCache, Compiler, Hints, Optimizations, ProgramSpec
+from ragged.model import CHIPS, runs_on
 from ragged.torch_adapter import (
     njt_softmax, register_program, register_torch_ops,
 )
@@ -32,25 +38,48 @@ def gpu_environment(tmp_path_factory):
     if not torch.cuda.is_available():
         pytest.skip("GPU correctness unverified: no CUDA device is available")
     capability = tuple(torch.cuda.get_device_capability())
-    if capability != (8, 9):
-        pytest.skip(f"GPU correctness unverified: requires sm_89, current device is sm_{capability[0]}{capability[1]}")
+    chip = target_chip(capability)
+    if chip is None or not runs_on(chip, capability):
+        pytest.skip(f"GPU correctness unverified: requires sm_86 or sm_89, current device is "
+                    f"sm_{capability[0]}{capability[1]}" + (f" (RAGGED_TEST_CHIP={chip})" if chip else ""))
     compiler_path = os.environ.get("RAGGED_COMPILE", str(Path(__file__).resolve().parents[2] / "build/bin/ragged-compile"))
-    compiler = Compiler(compiler_path)
+    record = os.environ.get("RAGGED_TOOLCHAIN_RECORD")
+    compiler = Compiler(compiler_path, toolchain_record=record)
     # These must fail on a GPU-equipped machine if the project installation is
     # incomplete. They must not silently turn expected numerical tests into skips.
-    compiler.toolchain()
+    compiler.toolchain(chip=chip)
     importlib.import_module("ragged._native")
     # One cache serves the whole session, which compiles far more hint and
     # option variants per signature than the production bound allows.
-    cache = ArtifactCache(tmp_path_factory.mktemp("gpu-compiled-cache"), max_specializations=4096)
+    root = os.environ.get("RAGGED_TEST_CACHE")
+    if record and not root:
+        raise RuntimeError("RAGGED_TOOLCHAIN_RECORD needs RAGGED_TEST_CACHE, the precompiled cache")
+    cache = ArtifactCache(root or tmp_path_factory.mktemp("gpu-compiled-cache"), max_specializations=4096)
     programs = {}
 
     def compile_spec(spec):
+        spec = retarget(spec, chip)
         if spec.ir_hash not in programs:
             programs[spec.ir_hash] = compiler.compile(spec, cache)
         return programs[spec.ir_hash]
 
     return torch, compile_spec, compiler, cache
+
+
+def target_chip(capability: tuple[int, int]) -> str | None:
+    """RAGGED_TEST_CHIP, or the chip of a device of ``capability`` if supported."""
+    chip = os.environ.get("RAGGED_TEST_CHIP") or f"sm_{capability[0]}{capability[1]}"
+    return chip if chip in CHIPS else None
+
+
+def retarget(spec, chip: str):
+    """The tests write specs for the default chip; compile them for ``chip``."""
+    return spec if spec.chip == chip else replace(spec, chip=chip)
+
+
+def precompiled() -> bool:
+    """Whether programs come from a precompiled cache, with no compiler or ptxas."""
+    return bool(os.environ.get("RAGGED_TOOLCHAIN_RECORD"))
 
 
 def prepared(values, dtype):
@@ -240,7 +269,8 @@ def test_inplace_softmax_requires_three_kernel_schedule(gpu_environment, dtype, 
 
 def test_nondefault_stream_and_program_lifetime(gpu_environment):
     torch, _, compiler, cache = gpu_environment
-    spec = ProgramSpec("sum", "f32", 7, strategy="naive")
+    spec = retarget(ProgramSpec("sum", "f32", 7, strategy="naive"),
+                    target_chip(tuple(torch.cuda.get_device_capability())))
     # Avoid the test fixture's program memo so deleting it actually drops the
     # last local CompiledProgram reference while its kernels may be in flight.
     program = compiler.compile(spec, cache)

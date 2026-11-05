@@ -1,4 +1,4 @@
-"""Independent checked-offset device tests; missing sm_89 is never a pass.
+"""Independent checked-offset device tests; a missing sm_86 or sm_89 device is never a pass.
 
 The expected diagnostics use Python integers, so adversarial i64 endpoints
 cannot overflow the reference. Invalid input must fail before touching output.

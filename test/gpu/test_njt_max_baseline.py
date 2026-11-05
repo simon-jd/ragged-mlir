@@ -12,8 +12,8 @@ def njt_max_environment():
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("NJT max baseline unverified: no CUDA device")
-    if tuple(torch.cuda.get_device_capability()) != (8, 9):
-        pytest.skip("NJT max baseline requires sm_89")
+    if tuple(torch.cuda.get_device_capability()) not in ((8, 6), (8, 9)):
+        pytest.skip("NJT max baseline requires sm_86 or sm_89")
     from baselines.torch_reference import njt_max
     return torch, njt_max
 

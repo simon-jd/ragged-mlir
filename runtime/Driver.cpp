@@ -175,7 +175,7 @@ struct DriverModule::Impl {
     return handle;
   }
 
-  explicit Impl(const std::string &cubin) {
+  Impl(const std::string &cubin, int targetMajor, int targetMinor) {
     driver.check(driver.getCurrent(&context), "cuCtxGetCurrent");
     if (!context)
       throw std::runtime_error("no current CUDA context; initialize PyTorch CUDA before loading a cubin");
@@ -184,9 +184,11 @@ struct DriverModule::Impl {
     // CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR/MINOR from the Driver API.
     driver.check(driver.getAttribute(&major, 75, ordinal), "cuDeviceGetAttribute(major)");
     driver.check(driver.getAttribute(&minor, 76, ordinal), "cuDeviceGetAttribute(minor)");
-    if (major != 8 || minor != 9)
-      throw std::runtime_error("sm_89 cubin requires an sm_89 device; current device is sm_" +
-                               std::to_string(major) + std::to_string(minor));
+    if (major != targetMajor || minor < targetMinor)
+      throw std::runtime_error("sm_" + std::to_string(targetMajor) + std::to_string(targetMinor) +
+                               " cubin requires an sm_" + std::to_string(targetMajor) + "x device of at least" +
+                               " that minor version; current device is sm_" + std::to_string(major) +
+                               std::to_string(minor));
     // CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT.
     driver.check(driver.getAttribute(&multiprocessors, 16, ordinal), "cuDeviceGetAttribute(multiprocessors)");
     driver.check(driver.moduleLoad(&module, cubin.data()), "cuModuleLoadData");
@@ -201,10 +203,12 @@ struct DriverModule::Impl {
   }
 };
 
-DriverModule::DriverModule(const std::string &cubin) {
+DriverModule::DriverModule(const std::string &cubin, const std::string &target) {
   if (cubin.size() < 4 || cubin.compare(0, 4, "\x7f" "ELF") != 0)
     throw std::runtime_error("expected a compiled ELF cubin; PTX and empty input are rejected");
-  impl = std::make_unique<Impl>(cubin);
+  if (target != "sm_86" && target != "sm_89")
+    throw std::runtime_error("target must be sm_86 or sm_89, not " + target);
+  impl = std::make_unique<Impl>(cubin, target[3] - '0', target[4] - '0');
 }
 
 DriverModule::~DriverModule() {

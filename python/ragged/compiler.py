@@ -32,14 +32,61 @@ class CompilationResult:
 # file's identity. Hashing a statically linked compiler (about 220 MB) costs
 # about 0.1 s, so it happens once per file version instead of on every call.
 _EXECUTABLE_DIGESTS: dict[tuple, str] = {}
+TOOLCHAIN_FIELDS = ("llvm_commit", "llvm_version", "ptxas_version", "dialect_version", "chip", "features")
+
+
+def _hex_digest(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
 
 
 class Compiler:
-    def __init__(self, executable: str | os.PathLike[str] | None = None, *, timeout: float = 300):
+    """The ragged-compile executable, or, with ``toolchain_record``, the
+    artifacts it compiled ahead of time.
+
+    A toolchain record (written by ``record_toolchain`` next to a cache the
+    real compiler filled) holds the compiler's sha256 and its toolchain
+    identity per target. With it no compiler or ptxas runs: cache keys are
+    formed from the record, ``compile`` returns the precompiled artifacts and
+    a missing artifact is an error. This is how a machine without the MLIR
+    toolchain (a different glibc, no CUDA toolkit) runs compiled programs.
+    """
+
+    def __init__(self, executable: str | os.PathLike[str] | None = None, *, timeout: float = 300,
+                 toolchain_record: str | os.PathLike[str] | None = None):
         self.executable = str(executable or os.environ.get("RAGGED_COMPILE", "ragged-compile"))
         self.timeout = timeout
+        self.record = None if toolchain_record is None else self._load_record(Path(toolchain_record))
+
+    @staticmethod
+    def _load_record(path: Path) -> dict[str, Any]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_object)
+        except (OSError, ValueError, UnicodeError) as exc:
+            raise ToolchainUnavailable(f"cannot read toolchain record {path}: {exc}") from exc
+        if (not isinstance(data, dict) or set(data) != {"schema", "compiler_sha256", "toolchains"}
+                or data["schema"] != 1 or not _hex_digest(data["compiler_sha256"])
+                or not isinstance(data["toolchains"], list) or not data["toolchains"]
+                or any(not isinstance(entry, dict) or any(not isinstance(entry.get(field), str)
+                                                          or not entry[field].strip() for field in TOOLCHAIN_FIELDS)
+                       for entry in data["toolchains"])):
+            raise ToolchainUnavailable(f"toolchain record {path} is malformed")
+        return data
+
+    def record_toolchain(self, path: str | os.PathLike[str], *, chips: tuple[str, ...] = ("sm_89",),
+                         features: str = "+ptx80") -> dict[str, Any]:
+        """Write the identity a toolchain-record Compiler needs to load what
+        this compiler publishes: its sha256 and its toolchain per chip."""
+        if self.record is not None:
+            raise ToolchainUnavailable("a toolchain record is written from the real compiler")
+        data = {"schema": 1, "compiler_sha256": self._compiler_hash(),
+                "toolchains": [self.toolchain(chip=chip, features=features) for chip in chips]}
+        Path(path).write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return data
 
     def _executable(self) -> str:
+        if self.record is not None:
+            raise ToolchainUnavailable("this Compiler loads precompiled artifacts from a toolchain record "
+                                       "and runs no compiler")
         executable = shutil.which(self.executable)
         if executable is None:
             raise ToolchainUnavailable(
@@ -48,6 +95,8 @@ class Compiler:
 
     def _compiler_hash(self) -> str:
         """sha256 of the executable, recomputed whenever the file is replaced or rewritten."""
+        if self.record is not None:
+            return self.record["compiler_sha256"]
         try:
             path = self._executable()
             with open(path, "rb") as executable:
@@ -95,6 +144,13 @@ class Compiler:
         return CompilationResult(data, diagnostic, emit, tuple(command))
 
     def toolchain(self, *, chip: str = "sm_89", features: str = "+ptx80") -> dict[str, str]:
+        if self.record is not None:
+            for entry in self.record["toolchains"]:
+                if entry["chip"] == chip and entry["features"] == features:
+                    if entry["dialect_version"] != DIALECT_VERSION:
+                        raise CompilationError("recorded dialect version differs from the frontend")
+                    return dict(entry)
+            raise ToolchainUnavailable(f"the toolchain record has no {chip} {features} toolchain")
         command = [self._executable(), "--toolchain-json", f"--chip={chip}", f"--features={features}"]
         try:
             result = subprocess.run(command, capture_output=True, timeout=self.timeout, check=False)
@@ -108,9 +164,8 @@ class Compiler:
             data = json.loads(result.stdout, object_pairs_hook=_unique_object)
         except (ValueError, UnicodeError) as exc:
             raise ToolchainUnavailable("compiler --toolchain-json did not produce valid JSON") from exc
-        required = ("llvm_commit", "llvm_version", "ptxas_version", "dialect_version", "chip", "features")
         if not isinstance(data, dict) or any(not isinstance(data.get(field), str) or not data[field].strip()
-                                             for field in required):
+                                             for field in TOOLCHAIN_FIELDS):
             raise ToolchainUnavailable("compiler toolchain report is missing measured identity fields")
         if any(data[field].lower() in ("unknown", "unavailable", "not found")
                for field in ("llvm_commit", "ptxas_version")):
@@ -161,7 +216,9 @@ class Compiler:
                 raise CacheMismatch("cached compiler artifact lacks measured ptxas resources")
             return CompiledProgram(spec, cached, cache_hit=True)
         except CacheMiss:
-            pass
+            if self.record is not None:
+                raise CacheMiss(f"{spec.signature} {spec.strategy} ({spec.ir_hash[:16]}) was not precompiled "
+                                f"into {cache.root}; a toolchain-record Compiler runs no compiler") from None
         with tempfile.TemporaryDirectory(prefix="ragged-compile-") as directory:
             source = Path(directory) / "input.mlir"
             output = Path(directory) / "program.cubin"

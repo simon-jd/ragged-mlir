@@ -1191,7 +1191,7 @@ DictionaryAttr emitOffsetsValidation(OpBuilder &b, gpu::GPUModuleOp gpuModule,
 struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(ToGPUPass)
   StringRef getArgument() const final { return "ragged-to-gpu"; }
-  StringRef getDescription() const final { return "Generate sm_89 GPU kernels with uniform CTA reductions"; }
+  StringRef getDescription() const final { return "Generate sm_86 or sm_89 GPU kernels with uniform CTA reductions"; }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, func::FuncDialect, gpu::GPUDialect,
                     math::MathDialect, memref::MemRefDialect, scf::SCFDialect,
@@ -1229,6 +1229,11 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
     for (DispatchOp dispatch : dispatches) {
       auto map = *dispatch.getBody().front().getOps<MapSegmentsOp>().begin();
       module->setAttr("ragged.mask", b.getBoolAttr(bool(map.getMask())));
+      auto chipAttr = dispatch->getAttrOfType<StringAttr>("chip");
+      const ChipLimits *limits = lookupChip(chipAttr ? chipAttr.getValue() : kDefaultChip);
+      if (!limits) {
+        dispatch.emitOpError("target must be sm_86 or sm_89"); return signalPassFailure();
+      }
       auto budget = [&](StringRef name, int64_t fallback) -> Attribute {
         if (auto attr = map->getAttr(name)) return attr;
         return b.getI64IntegerAttr(fallback);
@@ -1237,8 +1242,8 @@ struct ToGPUPass : PassWrapper<ToGPUPass, OperationPass<ModuleOp>> {
           b.getNamedAttr("status", b.getStringAttr("unmeasured")),
           b.getNamedAttr("source", b.getUnitAttr()),
           b.getNamedAttr("requested", b.getDictionaryAttr({
-              b.getNamedAttr("regs_budget", budget("regs_budget", 65536)),
-              b.getNamedAttr("smem_per_cta", budget("smem_per_cta", 49152))})),
+              b.getNamedAttr("regs_budget", budget("regs_budget", limits->registersPerCta)),
+              b.getNamedAttr("smem_per_cta", budget("smem_per_cta", limits->sharedPerCta))})),
           b.getNamedAttr("kernels", b.getArrayAttr({}))}));
       auto classes = dispatch->getAttrOfType<ArrayAttr>("classes");
       bool hasWarp = llvm::any_of(classes, [](Attribute item) { return cast<StringAttr>(item).getValue() == "warp"; });

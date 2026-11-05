@@ -16,12 +16,15 @@ import sys
 import pytest
 
 from driver_fault_probe import MODES, build_images, fingerprint, validate_driver_rejection
-from test_correctness import gpu_environment
+from test_correctness import gpu_environment, precompiled, target_chip
 
 
 @pytest.fixture(scope="session")
 def driver_fault_setup(gpu_environment, tmp_path_factory):
     torch, compile_spec, _, _ = gpu_environment
+    if precompiled() or tuple(torch.cuda.get_device_capability()) != (8, 9) or target_chip((8, 9)) != "sm_89":
+        pytest.skip("the Driver fault probes assemble sm_89 and sm_90 cubins with ptxas and expect an sm_89 "
+                    "device and sm_89 programs")
     import ragged
     from ragged import Hints, ProgramSpec
     native = importlib.import_module("ragged._native")

@@ -12,8 +12,8 @@ def native_environment():
     torch = pytest.importorskip('torch')
     if not torch.cuda.is_available():
         pytest.skip('native baseline correctness unverified: no CUDA device')
-    if tuple(torch.cuda.get_device_capability()) != (8, 9):
-        pytest.skip('native baseline requires sm_89')
+    if tuple(torch.cuda.get_device_capability()) not in ((8, 6), (8, 9)):
+        pytest.skip('native baseline requires sm_86 or sm_89')
     return torch, NativeBaselines(os.environ.get('RAGGED_BASELINE_LIBRARY',
                                                  'build-baselines/libragged_baselines.so'))
 

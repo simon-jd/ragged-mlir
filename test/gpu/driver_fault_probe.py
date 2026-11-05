@@ -160,9 +160,9 @@ def probe(args, report):
     calls = {"python_constructor_calls": 0, "successful_constructors": 0, "python_launch_calls": 0}
     report["fault_calls"] = calls
 
-    def observed_module(blob):
+    def observed_module(blob, *args, **kwargs):
         calls["python_constructor_calls"] += 1
-        module = real_module(blob)
+        module = real_module(blob, *args, **kwargs)
         calls["successful_constructors"] += 1
         class Observed:
             def launch(self, *launch_args, **launch_kwargs):

@@ -65,6 +65,19 @@ def prepare_case(args):
     }
 
 
+def ragged_spec(method, args, scale, masked):
+    """The ProgramSpec a ragged-* method compiles (bench.precompile builds the same)."""
+    from ragged import Hints, Optimizations, ProgramSpec
+    optimizations = Optimizations(**{name: False for name in getattr(args, "disable_optimization", [])},
+                                  feature_tile=getattr(args, "feature_tile", None))
+    # ragged-auto chooses a schedule per call from the cost model;
+    # ragged-classified is the same program with device classification forced.
+    return ProgramSpec(args.op, args.dtype, args.d, args.offsets_dtype,
+                       strategy="naive" if method == "ragged-naive" else "auto", scale=scale, mask=masked,
+                       optimizations=optimizations, hints=Hints(**getattr(args, "length_bounds", {})),
+                       chip=getattr(args, "chip", "sm_89"))
+
+
 def make_call(method, args, torch, values, offsets, destination, mask=None):
     """Return a complete-call callable and method preparation evidence."""
     scale = float(np.float32(getattr(args, "scale", 1.0)))
@@ -133,23 +146,22 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
         return (lambda: baseline_output(baseline.call(method, baseline_input(), offsets, args.op)),
                 {**baseline.provenance, "mapping": mapping})
     if method.startswith("ragged-"):
-        from ragged import ArtifactCache, Compiler, Hints, Optimizations, ProgramSpec
-        compiler = Compiler(args.compiler)
-        optimizations = Optimizations(**{name: False for name in getattr(args, "disable_optimization", [])},
-                                      feature_tile=getattr(args, "feature_tile", None))
-        # ragged-auto chooses a schedule per call from the cost model;
-        # ragged-classified is the same program with device classification forced.
-        spec = ProgramSpec(args.op, args.dtype, args.d, args.offsets_dtype,
-                           strategy="naive" if method == "ragged-naive" else "auto", scale=scale, mask=mask is not None,
-                           optimizations=optimizations,
-                           hints=Hints(**getattr(args, "length_bounds", {})))
-        cache_path = destination / "cache" / method
-        # Refuse a reused result directory so 'cold' always means absent artifact.
-        cache = ArtifactCache(cache_path)
+        from ragged import ArtifactCache, Compiler
+        record = getattr(args, "toolchain_record", None)
+        compiler = Compiler(args.compiler, toolchain_record=record)
+        spec = ragged_spec(method, args, scale, mask is not None)
+        if record is not None:
+            # Precompiled artifacts (bench.precompile); no compiler runs here.
+            cache = ArtifactCache(args.cache)
+        else:
+            # Refuse a reused result directory so 'cold' always means absent artifact.
+            cache = ArtifactCache(destination / "cache" / method)
         start = time.perf_counter_ns()
         program = compiler.compile(spec, cache)
         cold_ms = (time.perf_counter_ns() - start) / 1e6
-        if program.cache_hit:
+        if record is not None:
+            cold_ms = None   # loaded, not compiled: there is no cold compile to time
+        elif program.cache_hit:
             raise RuntimeError("cold compile unexpectedly hit the cache")
         start = time.perf_counter_ns()
         hot = compiler.compile(spec, cache)
@@ -160,7 +172,8 @@ def make_call(method, args, torch, values, offsets, destination, mask=None):
         metadata = {"cold_compile_wall_ms": cold_ms, "hot_cache_wall_ms": hot_ms,
                     "cache_key": program.artifact.key.digest,
                     "compiler_sha256": program.artifact.key.compiler_sha256,
-                    "toolchain": compiler.toolchain(), "spec": spec.to_dict(), "last_execution_report": None}
+                    "toolchain": compiler.toolchain(chip=spec.chip), "spec": spec.to_dict(),
+                    "precompiled": record is not None, "last_execution_report": None}
 
         select = {"ragged-classified": "classified"}.get(method, "auto")
         if select == "classified" and program.naive is None:
@@ -325,8 +338,10 @@ def run(args) -> tuple[dict, int]:
         if not torch.cuda.is_available():
             raise NotApplicable("no CUDA device is available; no GPU measurements were made")
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        if (props.major, props.minor) != (8, 9):
-            raise NotApplicable(f"requires sm_89, observed sm_{props.major}{props.minor}")
+        from ragged.model import runs_on
+        chip = getattr(args, "chip", "sm_89")
+        if not runs_on(chip, (props.major, props.minor)):
+            raise NotApplicable(f"{chip} cubins do not run on sm_{props.major}{props.minor}")
         report["device"] = {"name": props.name, "capability": [props.major, props.minor],
                             "total_memory_bytes": props.total_memory,
                             "multiprocessors": props.multi_processor_count}
@@ -412,7 +427,7 @@ def run(args) -> tuple[dict, int]:
     return report, 1 if failed else 2 if unmeasured else 0 if measured else 2
 
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--op", choices=("sum", "max", "softmax"), default="sum")
     parser.add_argument("--dtype", choices=("f32", "bf16"), default="f32")
@@ -426,6 +441,10 @@ def main():
     parser.add_argument("--seed", type=int, default=711)
     parser.add_argument("--methods", nargs="+", choices=METHODS, default=list(METHODS))
     parser.add_argument("--compiler", default="build/bin/ragged-compile")
+    parser.add_argument("--chip", choices=("sm_86", "sm_89"), default="sm_89", help="target of the ragged programs")
+    parser.add_argument("--toolchain-record", type=Path,
+                        help="load ragged programs precompiled into --cache (bench.precompile); runs no compiler")
+    parser.add_argument("--cache", type=Path, help="with --toolchain-record: the precompiled artifact cache")
     parser.add_argument("--native-library", default="build-baselines/libragged_baselines.so")
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--mask", action="store_true", help="dense f32 additive softmax mask included in every method's complete call")
@@ -447,7 +466,14 @@ def main():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument("--output", type=Path, required=True)
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
+    if (args.toolchain_record is None) != (args.cache is None):
+        parser.error("--toolchain-record and --cache go together")
     if not 1 <= args.d <= 1024 or args.warmup < 0 or args.repeats < 1:
         parser.error("require D=1..1024, warmup>=0 and repeats>=1")
     if len(set(args.methods)) != len(args.methods):

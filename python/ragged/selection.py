@@ -12,14 +12,15 @@ with M = N*D elements (in units of 2^18, a MiB of f32), S = L * span / 128
 the elements each thread of the one block that owns the longest segment
 reads (span = d_tile * d_vector features per tile), skew = L / (N/B) and X
 the MiB of the call's working set (the input rows plus the output: B rows
-for sum and max, N rows for softmax) beyond the L2 capacity the model was
-calibrated with: a fixed cost (host work and launches), the per-element
+for sum and max, N rows for softmax) beyond the L2 capacity: a fixed cost (host work and launches), the per-element
 folds, the critical path of block per segment, per-segment work, the
 imbalance that skewed lengths add, and the bytes that back-to-back calls
 cannot keep in the L2. Coefficients are fitted per operation family (sum
 and max; softmax) and schedule by ``bench.calibrate`` and stored in
 ``cost_model.json``; classification runs only when its prediction is lower
-than block per segment's by the stored margin.
+than block per segment's by the stored margin. The model stores the L2
+capacity of the GPU it was calibrated on (``l2_mib``); the runtime passes the
+L2 of the device each call runs on instead, which is the same on that GPU.
 
 Version 1 models (before 2026-11) used the row bytes, N*D*element size in
 MiB, as the sixth term; for f32 that is M again. They still load, so that
@@ -103,20 +104,26 @@ class CostModel:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
     def predict(self, schedule: str, op: str, n: int, b: int, d: int, max_len: int, span: int,
-                element_bytes: int = 4) -> float:
-        terms = features(n, b, d, max_len, span, element_bytes, op, self.l2_mib, self.version)
+                element_bytes: int = 4, l2_mib: float | None = None) -> float:
+        """Predicted microseconds; ``l2_mib`` replaces the calibration GPU's L2 capacity."""
+        terms = features(n, b, d, max_len, span, element_bytes, op,
+                         self.l2_mib if l2_mib is None else l2_mib, self.version)
         return sum(c * x for c, x in zip(self.coefficients[family(op)][schedule], terms))
 
     def choose(self, op: str, n: int, b: int, d: int, max_len: int | None,
-               span: int, element_bytes: int = 4) -> tuple[str, dict[str, Any]]:
-        """The schedule to run and the inputs and predictions behind it."""
+               span: int, element_bytes: int = 4, l2_mib: float | None = None) -> tuple[str, dict[str, Any]]:
+        """The schedule to run and the inputs and predictions behind it;
+        ``l2_mib`` is the L2 capacity of the device that runs the call
+        (default: the GPU the model was calibrated on)."""
         if max_len is None:
             return "classified", {"max_len": None, "reason": "no length statistics on the host"}
-        classified = self.predict("classified", op, n, b, d, max_len, span, element_bytes)
-        naive = self.predict("naive", op, n, b, d, max_len, span, element_bytes)
+        if l2_mib is not None and not (isinstance(l2_mib, (int, float)) and l2_mib > 0):
+            raise ValueError("l2_mib must be a positive capacity in MiB")
+        classified = self.predict("classified", op, n, b, d, max_len, span, element_bytes, l2_mib)
+        naive = self.predict("naive", op, n, b, d, max_len, span, element_bytes, l2_mib)
         selected = "classified" if classified < naive * (1 - self.margin) else "naive"
-        return selected, {"max_len": max_len, "predicted_us": {"classified": round(classified, 2),
-                                                               "naive": round(naive, 2)}}
+        return selected, {"max_len": max_len, "l2_mib": self.l2_mib if l2_mib is None else l2_mib,
+                          "predicted_us": {"classified": round(classified, 2), "naive": round(naive, 2)}}
 
 
 _model: CostModel | None = None
