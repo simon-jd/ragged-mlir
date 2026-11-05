@@ -1,3 +1,31 @@
+Test runs at commit 0e4f6749ca2212302b43c1e7acdf5ba3506d415e (sm_86 as a second target), 2026-11-05.
+
+On home-ubuntu (RTX 4090, driver 595.99, CUDA 13.2), under the GPU lock:
+  PYTHONPATH=python:. RAGGED_COMPILE=build/bin/ragged-compile python -m pytest test/gpu
+  2,330 passed, 30 xfailed, 0 failed in 7.9 min, with an empty artifact cache (sm_89 programs)
+  nvidia-smi before and after: SM clock 210 and 2,520 MHz, memory clock 405 and 10,501 MHz, 35 and 44 C.
+  python -m pytest                  (test/python, CPU PyTorch 2.14.1)   1,213 passed
+  the same in a clean export without build outputs, as on the CPU CI runner: 1,094 passed, 119 skipped
+  ninja -C build check-ragged       (lit/FileCheck)                      45 passed
+  The same GPU tests with RAGGED_TEST_CHIP=sm_86 (sm_86 programs on the sm_89 device) filled the
+  artifact cache shipped to the A10, and passed there from that cache without a compiler on PATH
+  (2,324 passed, 6 skipped, 30 xfailed; the 6 are the Driver fault probes, which need ptxas and sm_89).
+
+On one NVIDIA A10-24Q vGPU (sm_86), driver 570.211.01 with the CUDA 13.2 forward-compatibility driver,
+programs loaded from the precompiled cache and no ragged-compile, ptxas or nvcc on PATH:
+  2,324 passed, 6 skipped, 30 xfailed, 0 failed in 3.9 min (../a10/tests/gpu-tests.log, .xml)
+  The 6 skips are the Driver fault probes (test/gpu/test_driver_faults.py), which assemble sm_89 and
+  sm_90 cubins with ptxas and expect an sm_89 device. compute-sanitizer and CUPTI do not work on the
+  vGPU, so no sanitizer run was made there.
+
+The sm_89 GPU dialect, PTX and kernel manifests are unchanged by the sm_86 target: for 530 sm_89
+programs (every benchmark-suite program, and each op, dtype, D in {1, 2, 7, 24, 40, 1024} and offset
+type with and without hints, vector access, mask, scale and in-place output), ragged-compile built
+at 1db5d0d and at 0e4f674 emit the same bytes (scripts/compare_compilers.py). The compute-sanitizer
+runs below were at 0c4be17 and were not repeated.
+
+Earlier runs:
+
 Test runs on home-ubuntu (RTX 4090, driver 595.99, CUDA 13.2), all at commit
 0c4be17c68858e9d916531446cbbf89e9e6610d7, which has the refitted cost model (python/ragged/selection.py and
 cost_model.json). The commits after it change only docs and result files.

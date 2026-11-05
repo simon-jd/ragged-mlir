@@ -1,8 +1,11 @@
 # Results
 
 Every committed result, the commit it was measured at, when, and the claim it
-backs. All of it ran on one RTX 4090 (driver 595.99, CUDA 13.2) that also
-drives a desktop and is shared with other projects; clocks were not locked.
+backs. All of it but `a10/` ran on one RTX 4090 (driver 595.99, CUDA 13.2)
+that also drives a desktop and is shared with other projects; clocks were not
+locked. `a10/` holds the runs on one NVIDIA A10-24Q vGPU (sm_86) on a
+Snowflake trial compute pool and lists its own files
+([a10/README.md](a10/README.md)).
 Dates are local (UTC-8). The detailed tables are in
 [bench/README.md](bench/README.md).
 
