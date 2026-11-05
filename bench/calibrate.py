@@ -17,6 +17,11 @@ turn is left out, the coefficients are fitted on the others, and the margin
 of 0, 1, ..., 10% that puts the most left-out inputs within 3% of the faster
 schedule is kept (the smallest on a tie).
 
+`transfer` applies the protocol bench.suite fixes for a second GPU: it
+fits on that GPU's TRANSFER_FIT_GROUPS runs (written to --output) and
+reports, on its TRANSFER_HELDOUT_GROUP runs, the shipped model, the shipped
+model with the runs' L2 capacity and the refitted one.
+
 `evaluate` reads a suite's runs (which also time ragged-auto, the adaptive
 program) and reports, per workload and seed, both schedules, the one the
 model chooses, the adaptive call as measured (it ran the model installed
@@ -221,6 +226,49 @@ def fit_groups(runs: Path, groups: list[str], seeds: list[int]) -> tuple[dict, l
     return data, inputs, {"scores": scores, "result": result}, margin
 
 
+def run_transfer(args: argparse.Namespace) -> None:
+    from bench.suite import TRANSFER_FIT_GROUPS, TRANSFER_HELDOUT_GROUP
+    shipped = CostModel.load(args.model)
+    data, inputs, _, margin = fit_groups(args.runs, list(TRANSFER_FIT_GROUPS), args.seeds)
+    args.output.write_text(json.dumps(data, indent=2) + "\n")
+    refit = CostModel.from_dict(data)
+    print(f"model {args.model}: fitted with an L2 of {shipped.l2_mib:g} MiB")
+    print(f"refitted on {len(inputs)} inputs of {', '.join(TRANSFER_FIT_GROUPS)} in {args.runs} "
+          f"(L2 {refit.l2_mib:g} MiB, margin {margin:.2f}): {args.output}")
+    print(f"refitted coefficients {json.dumps(data['coefficients'])}")
+    print(f"within 3% of the faster schedule on its training inputs: {within(refit, inputs)} of {len(inputs)}")
+    variants = (("shipped", shipped, False), ("L2 swapped", shipped, True), ("refitted", refit, True))
+    for l2 in ("warm", "cold"):
+        held = points(collect(args.runs, l2, TRANSFER_HELDOUT_GROUP), args.seeds)
+        print(f"\n{l2} L2, {TRANSFER_HELDOUT_GROUP} runs, seeds {' '.join(map(str, args.seeds))}, "
+              f"{len(held)} inputs (L2 {l2_of(held):g} MiB): median complete-call us over repetitions")
+        excesses = {name: excess(model, held, device_l2) for name, model, device_l2 in variants}
+        adaptive = []
+        print(f"{'case':34} {'seed':>4} {'classified':>10} {'naive':>8} " +
+              " ".join(f"{name:>12}" for name, _, _ in variants) + f" {'adaptive ran':>13}")
+        for index, ((name, seed), entry) in enumerate(held):
+            times = measured(entry)
+            row = f"{name:34} {seed:>4} {times['classified']:10.1f} {times['naive']:8.1f}"
+            for variant, model, device_l2 in variants:
+                chosen, _ = model.choose(entry["case"]["op"], *shape(entry["case"]),
+                                         l2_mib=entry["l2_mib"] if device_l2 else None)
+                row += f" {chosen[:5]:>5} {100 * excesses[variant][index]:+5.1f}%"
+            if entry["methods"].get("ragged-auto"):
+                auto = statistics.median(entry["methods"]["ragged-auto"]) / min(times.values()) - 1
+                adaptive.append(auto)
+                ran = "/".join(sorted({s for s in entry["selected"] if s}))
+                row += f" {ran[:5]:>5} {100 * auto:+6.1f}%"
+            print(row)
+        for variant, _, _ in variants:
+            values = excesses[variant]
+            print(f"{variant:>12}: {sum(x <= NOISE_TIE for x in values)} of {len(values)} within 3% of the faster "
+                  f"schedule; mean excess {100 * statistics.mean(values):+.2f}%")
+        if adaptive:
+            print(f"{'as run':>12}: {sum(x <= NOISE_TIE for x in adaptive)} of {len(adaptive)} within 3% "
+                  f"(ragged-auto measured, with the runtime's model and the device's L2); "
+                  f"mean excess {100 * statistics.mean(adaptive):+.2f}%")
+
+
 def run_evaluate(args: argparse.Namespace) -> None:
     model = CostModel.load(args.model)
     for l2 in ("warm", "cold"):
@@ -266,6 +314,12 @@ def main() -> None:
     fitter.add_argument("--train", type=int, nargs="+", default=[711, 712, 713])
     fitter.add_argument("--output", type=Path, required=True)
     fitter.set_defaults(handler=run_fit)
+    transfer = commands.add_parser("transfer", help="the shipped model on another GPU's runs, and refitted there")
+    transfer.add_argument("runs", type=Path)
+    transfer.add_argument("--seeds", type=int, nargs="+", default=[711, 712, 713])
+    transfer.add_argument("--model", type=Path, default=Path("python/ragged/cost_model.json"))
+    transfer.add_argument("--output", type=Path, required=True, help="where to write the refitted model")
+    transfer.set_defaults(handler=run_transfer)
     evaluator = commands.add_parser("evaluate", help="compare the model's choice and the adaptive program with both schedules")
     evaluator.add_argument("runs", type=Path)
     evaluator.add_argument("--seeds", type=int, nargs="+", default=[711, 712, 713])

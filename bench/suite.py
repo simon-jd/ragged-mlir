@@ -48,6 +48,16 @@ HELDOUT_SHAPES = ((1, 4096, 1048576), (1, 65536, 1048576), (32, 8192, 524288), (
 HELDOUT2_SHAPES = ((1, 200000, 3200000), (2, 32768, 2097152), (8, 131072, 1310720), (16, 12288, 786432),
                    (48, 6000, 393216), (96, 2500, 160000), (192, 768, 196608), (512, 512, 32768))
 HELDOUT2_DISTRIBUTIONS = ("bimodal", "exponential")
+# How the cost model transfers to a second GPU (an A10 vGPU, sm_86), fixed
+# on 2026-11-05 before any run on it. On that GPU's runs of the second
+# held-out set (HELDOUT2_SHAPES, 144 inputs), three models choose between the
+# two schedules: the one fitted on the RTX 4090 as shipped, the same with
+# only its L2 capacity replaced by that GPU's, and one refitted on that GPU's
+# runs of the inputs the shipped model was fitted on (the 19 benchmark
+# workloads, from the compare group with ragged-classified added, and
+# HELDOUT_SHAPES; seeds 711 to 713). bench.calibrate transfer reports it.
+TRANSFER_FIT_GROUPS = ("compare", "heldout")
+TRANSFER_HELDOUT_GROUP = "heldout2"
 SCHEDULE_METHODS = ("ragged-classified", "ragged-naive", "ragged-auto")
 
 
