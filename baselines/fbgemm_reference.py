@@ -142,8 +142,8 @@ def call(values, offsets, operation: str = "softmax", *, max_len: int | None = N
     if not values.is_cuda or values.device != offsets.device:
         raise ValueError("FBGEMM inputs must be on the same CUDA device")
     with torch.cuda.device(values.device):
-        if tuple(torch.cuda.get_device_capability(values.device)) != (8, 9):
-            raise ValueError("FBGEMM comparison target must be sm_89")
+        if tuple(torch.cuda.get_device_capability(values.device)) not in ((8, 6), (8, 9)):
+            raise ValueError("FBGEMM comparison target must be sm_86 or sm_89")
         operator, _ = _load()
         if operation == "sum":
             return _segment_sum(values, offsets, torch)

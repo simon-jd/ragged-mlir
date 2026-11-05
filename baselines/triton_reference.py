@@ -367,8 +367,8 @@ def call(values, offsets, operation, config: Config | None = None):
         raise ValueError('segment and chunk counts exceed the CUDA grid x limit')
     op = OPS[operation]
     with torch.cuda.device(values.device):
-        if tuple(torch.cuda.get_device_capability(values.device)) != (8, 9):
-            raise ValueError('benchmark target must be sm_89')
+        if tuple(torch.cuda.get_device_capability(values.device)) not in ((8, 6), (8, 9)):
+            raise ValueError('benchmark target must be sm_86 or sm_89')
         stream = torch.cuda.current_stream(values.device)
         output = torch.empty((n if operation == 'softmax' else b, d), dtype=values.dtype, device=values.device)
         if b == 0:
